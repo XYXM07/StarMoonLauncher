@@ -15,7 +15,7 @@ from launcher.service import Application
 class FolderTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()
         self.app = Application(self.root / "launcher")
         self.external = self.root / "original/.minecraft"
         self.base = self.external / "versions/1.20.1"

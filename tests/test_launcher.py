@@ -20,7 +20,7 @@ from main import storage_paths
 class LauncherTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()
         self.app = Application(self.root)
         self.app.store.create_minecraft()
 

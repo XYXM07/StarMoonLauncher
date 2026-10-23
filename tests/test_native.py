@@ -48,7 +48,8 @@ def wheel(widget, angle=-120, pixels=0):
 class NativeTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
-        self.service = Application(Path(self.temp.name))
+        self.root = Path(self.temp.name).resolve()
+        self.service = Application(self.root)
         self.service.store.create_minecraft()
         self.search_patch = patch.object(self.service.content, "search", return_value={"hits": [], "total_hits": 0})
         self.search_patch.start()
@@ -56,7 +57,7 @@ class NativeTests(unittest.TestCase):
         self.manifest_patch.start()
         self.loaders_patch = patch.object(self.service.game, "loader_versions", return_value=[{"version": "1.0.0", "stable": True}])
         self.loaders_patch.start()
-        self.window = LauncherWindow(Path(self.temp.name), service=self.service)
+        self.window = LauncherWindow(self.root, service=self.service)
         self.window.timer.stop()
         self.window.resize(1050, 700)
         self.window.show()
@@ -245,7 +246,7 @@ class NativeTests(unittest.TestCase):
         self.assertEqual(self.service.store.config()["selected_instance"], instance["id"])
 
     def test_custom_background_is_copied_and_applied_immediately(self):
-        source = Path(self.temp.name) / "custom.png"
+        source = self.root / "custom.png"
         image = QImage(360,240,QImage.Format_RGB32)
         image.fill(QColor("#5c8fe0"))
         image.save(str(source),"PNG")
@@ -353,7 +354,7 @@ class NativeTests(unittest.TestCase):
 
     def test_background_reset_cancels_pending_image_and_navigation_keeps_choice(self):
         self.window.set_settings_category("appearance")
-        source = Path(self.temp.name)/"wallpaper.png"
+        source = self.root/"wallpaper.png"
         image = QImage(24,24,QImage.Format_RGB32)
         image.fill(QColor("blue")); image.save(str(source))
         with patch("launcher.desktop.QFileDialog.getOpenFileName",return_value=(str(source),"")):
@@ -383,7 +384,7 @@ class NativeTests(unittest.TestCase):
             self.assertEqual(self.window.instance_category, "logs")
 
     def test_glass_blurs_background_and_reuses_cache_across_navigation(self):
-        source = Path(self.temp.name) / "checker.png"
+        source = self.root / "checker.png"
         image = QImage(256, 256, QImage.Format_RGB32)
         for x in range(256):
             for y in range(256):
@@ -408,7 +409,7 @@ class NativeTests(unittest.TestCase):
         self.assertNotEqual(surface.backdrop(True).cacheKey(), key)
 
     def test_wallpaper_all_main_pages_dialog_exclusion_and_transparent_corners(self):
-        source = Path(self.temp.name) / "home-only.png"
+        source = self.root / "home-only.png"
         image = QImage(120, 80, QImage.Format_RGB32)
         image.fill(QColor("#e86bb2"))
         image.save(str(source))
@@ -439,7 +440,7 @@ class NativeTests(unittest.TestCase):
         self.assertGreater(surface.backdrop().toImage().pixelColor(10,10).alpha(), low)
 
     def test_refraction_changes_edge_sampling_without_distorting_center(self):
-        source = Path(self.temp.name) / "refraction.png"
+        source = self.root / "refraction.png"
         image = QImage(256, 256, QImage.Format_RGB32)
         for x in range(256):
             for y in range(256):
@@ -523,7 +524,7 @@ class NativeTests(unittest.TestCase):
 
     def test_add_minecraft_folder_ui_selects_and_opens_original_version(self):
         from launcher.core import atomic_json
-        original = Path(self.temp.name) / "original/.minecraft"
+        original = self.root / "original/.minecraft"
         version = original / "versions/1.20.1"
         version.mkdir(parents=True)
         atomic_json(version / "1.20.1.json", {"id": "1.20.1", "mainClass": "Main", "libraries": []})
@@ -609,7 +610,7 @@ class NativeTests(unittest.TestCase):
     def test_offline_skin_ui_import_avatar_and_reset(self):
         account=self.service.accounts.offline("SkinPreview")
         self.window.refresh()
-        source=Path(self.temp.name)/"preview.png"
+        source=self.root/"preview.png"
         image=QImage(64,64,QImage.Format_ARGB32)
         image.fill(QColor("#e4608f"))
         image.save(str(source))
@@ -796,7 +797,7 @@ class NativeTests(unittest.TestCase):
 
     def test_version_management_import_remove_and_settings_draft(self):
         instance = self.service.game.create("Managed", "1.21.1", "fabric")
-        source = Path(self.temp.name) / "imported.jar"
+        source = self.root / "imported.jar"
         source.write_bytes(b"local UI import fixture")
         self.window.refresh()
         self.window.open_instance(instance["id"])
@@ -840,7 +841,7 @@ class NativeTests(unittest.TestCase):
             self.assertEqual(install.call_args.args[2], "")
 
     def test_fresh_portable_directory_created_only_by_library_button(self):
-        portable = Path(self.temp.name) / "new-portable"
+        portable = self.root / "new-portable"
         service = Application(portable / "data", minecraft_root=portable / ".Minecraft")
         window = LauncherWindow(portable / "data", service=service)
         window.timer.stop()
@@ -931,7 +932,7 @@ class NativeTests(unittest.TestCase):
         self.assertEqual((self.window.width(),self.window.height()),(900,600))
         self.window.settings_fields["launcher_width"].setValue(980)
         self.window.settings_fields["launcher_height"].setValue(660)
-        restored = LauncherWindow(Path(self.temp.name),service=self.service)
+        restored = LauncherWindow(self.root,service=self.service)
         restored.timer.stop()
         try:
             self.assertEqual((restored.width(),restored.height()),(980,660))
@@ -1258,7 +1259,7 @@ class NativeTests(unittest.TestCase):
         image.fill(QColor("black"))
         for x in range(8,16):
             for y in range(8,16): image.setPixelColor(x,y,QColor("red"))
-        path = Path(self.temp.name)/"legacy-skin.png"
+        path = self.root/"legacy-skin.png"
         image.save(str(path))
         self.assertEqual(skin_avatar(path).toImage().pixelColor(20,20),QColor("red"))
 
@@ -1283,7 +1284,7 @@ class NativeTests(unittest.TestCase):
             wait_for(lambda:dialog.export_button.isEnabled())
             download.assert_called_once_with("FixturePlayer")
             self.assertFalse(dialog.preview.image.isNull())
-            exported = Path(self.temp.name)/"exported-skin.png"
+            exported = self.root/"exported-skin.png"
             with patch("launcher.desktop.QFileDialog.getSaveFileName",return_value=(str(exported),"")):
                 dialog.export_button.click()
             wait_for(exported.is_file)
