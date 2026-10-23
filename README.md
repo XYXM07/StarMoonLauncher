@@ -2,6 +2,10 @@
 
 由 **星月晓梦** 制作的 Windows Minecraft Java 版第三方启动器。使用 Python / PySide6 构建，提供原生无边框液态玻璃界面，可打包为单个 EXE。当前版本 **0.7.5**。
 
+[下载 Windows 64 位单文件版](https://github.com/XYXM07/StarMoonLauncher/releases/download/v0.7.5/StarMoonLauncher-0.7.5-windows-x64.exe) · [GitHub Releases](https://github.com/XYXM07/StarMoonLauncher/releases)
+
+下载 EXE 后直接双击运行，无需安装 Python 或自行编译。
+
 ![启动界面](docs/images/home.png)
 
 ## 功能
