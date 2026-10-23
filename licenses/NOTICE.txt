@@ -1,0 +1,16 @@
+StarMoon Launcher uses Python 3.8.6, Qt 6.6.3 / PySide 6.6.3.1 / Shiboken 6.6.3.1.
+Qt/PySide/Shiboken Copyright The Qt Company Ltd. and contributors. LGPLv3.
+Python Copyright Python Software Foundation. PSF License.
+Qt sources: https://code.qt.io/cgit/qt/qtbase.git/?h=v6.6.3
+PySide/Shiboken sources: https://code.qt.io/cgit/pyside/pyside-setup.git/?h=v6.6.3.1
+No modifications were made to these third-party libraries. The project source, requirements.txt and build.py allow rebuilding with replacement libraries.
+This application does not prohibit reverse engineering for debugging modifications to LGPL components.
+
+Microsoft MSAL Python 1.36.0 and pymsalruntime 0.20.0: MIT License.
+MSAL source: https://github.com/AzureAD/microsoft-authentication-library-for-python
+Additional dependency licenses: MSAL-and-dependencies.txt
+
+authlib-injector 1.2.8, Copyright its contributors, unmodified official binary.
+AGPLv3 or later with the AUTHLIB-INJECTOR exception; license and bundled dependencies: authlib-injector.txt and authlib-injector-COPYING.md.
+Source and corresponding release: https://github.com/yushijinhun/authlib-injector/tree/v1.2.8
+Bundled SHA-256: 9c7f4343e6c82034958ffb48c14a2cb0c85928be7283103ce17da00c6d5a7b10

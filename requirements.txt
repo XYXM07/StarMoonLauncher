@@ -1,0 +1,4 @@
+PySide6-Essentials==6.6.3.1
+msal[broker]==1.36.0
+pymsalruntime==0.20.0
+tomli==2.0.1
