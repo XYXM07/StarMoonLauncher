@@ -837,7 +837,10 @@ class NativeTests(unittest.TestCase):
         wait_for(lambda: any(button.text() == "禁用" for button in panel.findChildren(Button)))
         toggle = next(button for button in panel.findChildren(Button) if button.text() == "禁用")
         QTest.mouseClick(toggle, Qt.LeftButton)
-        wait_for(lambda: (mods / "example.jar.disabled").exists())
+        # The normal refresh timer is stopped in this fixture. A rename can be
+        # visible before the worker marks its task completed; wait for both.
+        wait_for(lambda: (mods / "example.jar.disabled").exists() and
+                 all(task["status"] == "completed" for task in self.service.tasks.list()))
         self.window.refresh()
         wait_for(lambda: any(b.text() == "启用" for b in panel.findChildren(Button)))
         QTest.mouseClick(self.window.sidebar.findChild(Button, "instance-logs"), Qt.LeftButton)
