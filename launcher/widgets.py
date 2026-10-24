@@ -6,6 +6,7 @@ from PySide6.QtWidgets import (QAbstractScrollArea, QAbstractSpinBox, QApplicati
                                QLabel, QPushButton, QScrollArea, QSizePolicy, QProxyStyle, QStyle,
                                QVBoxLayout, QWidget)
 from .material import paint_glass
+from .i18n import tr
 from .motion import entrance
 from .themes import color, stylesheet
 
@@ -82,7 +83,7 @@ def remove_focus_rings():
 
 class Button(QPushButton):
     def __init__(self, text, callback=None, primary=False, danger=False, parent=None):
-        super().__init__(text, parent)
+        super().__init__(tr(text), parent)
         self.primary, self.danger = primary, danger
         self._hover = 0.0
         self._press = 0.0
@@ -103,6 +104,9 @@ class Button(QPushButton):
         self.released.connect(lambda: self.animate_press(False))
         if callback:
             self.clicked.connect(callback)
+
+    def setText(self, text):
+        super().setText(tr(text))
 
     def get_hover(self):
         return self._hover
@@ -385,9 +389,15 @@ class ElidedLabel(QLabel):
         self.setObjectName(name)
         self.setMinimumWidth(0)
         self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.setText(text)
+
+    def setText(self, text):
+        self.full_text = str(text)
+        self.setToolTip(self.full_text)
+        super().setText(self.fontMetrics().elidedText(self.full_text, Qt.ElideRight, self.contentsRect().width()))
 
     def resizeEvent(self, event):
-        self.setText(self.fontMetrics().elidedText(self.full_text, Qt.ElideRight, self.contentsRect().width()))
+        super().setText(self.fontMetrics().elidedText(self.full_text, Qt.ElideRight, self.contentsRect().width()))
         super().resizeEvent(event)
 
 

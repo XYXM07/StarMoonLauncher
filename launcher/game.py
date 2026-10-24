@@ -19,6 +19,7 @@ from .core import (MANIFEST, Cancelled, LauncherError, atomic_json, extract_zip,
                    read_json, request_json, safe_path, valid_id, version_id)
 from .memory import effective_memory, java_bits
 from .skins import SkinManager
+from . import __version__
 
 
 def os_name():
@@ -489,7 +490,7 @@ class GameManager:
                   "auth_access_token": account["access_token"], "auth_session": "token:{}:{}".format(account["access_token"], account["id"]),
                   "user_type": account["user_type"], "version_type": profile.get("type", "release"),
                   "natives_directory": str(Path(runtime_directory or directory) / "natives"), "launcher_name": "StarMoon",
-                  "launcher_version": "0.7.5", "classpath": os.pathsep.join(classpath),
+                  "launcher_version": __version__, "classpath": os.pathsep.join(classpath),
                   "classpath_separator": os.pathsep, "library_directory": str(self.mc / "libraries"),
                   "resolution_width": str(config["width"]), "resolution_height": str(config["height"]),
                   "user_properties": "{}", "clientid": account.get("client_id", ""), "auth_xuid": account.get("xuid", ""),

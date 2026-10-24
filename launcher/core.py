@@ -17,8 +17,9 @@ import urllib.request
 import uuid
 import zipfile
 from pathlib import Path
+from . import __version__
 
-USER_AGENT = "StarMoonLauncher/0.7.5 (native desktop Minecraft launcher)"
+USER_AGENT = "StarMoonLauncher/{} (native desktop Minecraft launcher)".format(__version__)
 MANIFEST = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json"
 MIRROR = "https://bmclapi2.bangbang93.com"
 SSL_CONTEXT = ssl.create_default_context()
@@ -329,8 +330,8 @@ class Store:
                          "download_parallel": True, "download_segments": min(8,os.cpu_count() or 4),
                          "minecraft_folders": [], "library_root": "", "hidden_external_instances": [],
                          "launcher_width": 900, "launcher_height": 600, "compact_window_default": True,
-                         "color_scheme": "starmoon", "ai_base_url": "", "ai_model": "",
-                         "ai_crash_analysis": True, "ai_auto_preflight": False}
+                         "language": "zh_CN", "color_scheme": "starmoon", "ai_base_url": "", "ai_model": "",
+                         "ai_crash_analysis": True, "ai_auto_preflight": False, "auto_check_updates": True}
         saved = read_json(self.path, {})
         self.data = dict(self.defaults, **saved)
         if "background_mode" not in saved and saved.get("background_path"):
@@ -456,10 +457,13 @@ class Store:
         return sorted(result, key=lambda x: x.get("last_played", x.get("created", 0)), reverse=True)
 
     def instance(self, instance_id):
-        data = read_json(self.instance_dir(instance_id) / "instance.json")
-        if data is None:
-            raise LauncherError("游戏实例不存在")
-        return data
+        # Windows may deny opening a file during its atomic replacement.
+        # Share the writer's RLock so launch/exit metadata reads are consistent.
+        with self.lock:
+            data = read_json(self.instance_dir(instance_id) / "instance.json")
+            if data is None:
+                raise LauncherError("游戏实例不存在")
+            return data
 
     def update_instance(self, instance_id, changes):
         with self.lock:

@@ -13,6 +13,7 @@ from pathlib import Path
 from collections import deque
 
 from .core import LauncherError, safe_path
+from . import __version__
 
 AGENT = "authlib-injector-1.2.8.jar"
 AGENT_SHA256 = "9c7f4343e6c82034958ffb48c14a2cb0c85928be7283103ce17da00c6d5a7b10"
@@ -115,7 +116,7 @@ class SkinSession:
         key = rsa.generate_private_key(public_exponent=65537,key_size=2048)
         public = key.public_key().public_bytes(serialization.Encoding.PEM,serialization.PublicFormat.SubjectPublicKeyInfo).decode("ascii")
         public_der = key.public_key().public_bytes(serialization.Encoding.DER,serialization.PublicFormat.SubjectPublicKeyInfo)
-        self.metadata = {"meta":{"serverName":"StarMoon Offline Skins","implementationName":"StarMoon","implementationVersion":"0.7.5","feature.non_email_login":True,"feature.enable_profile_key":False},
+        self.metadata = {"meta":{"serverName":"StarMoon Offline Skins","implementationName":"StarMoon","implementationVersion":__version__,"feature.non_email_login":True,"feature.enable_profile_key":False},
                          "skinDomains":["127.0.0.1"],"signaturePublickey":public}
         self.token = uuid.uuid4().hex
         prefix = "/"+self.token

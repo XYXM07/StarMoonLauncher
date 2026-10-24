@@ -380,7 +380,10 @@ class Diagnostics:
         if "local_findings" in safe: safe["local_findings"] = [str(v)[:200] for v in safe["local_findings"][:20]]
         if "logs" in safe: safe["logs"] = safe["logs"][-22000:]
         prompt = json.dumps(safe,ensure_ascii=False)
-        body = {"model":model,"messages":[{"role":"system","content":SYSTEM},{"role":"user","content":prompt}],"max_tokens":2048,"stream":False,"response_format":{"type":"json_object"}}
+        system = SYSTEM
+        if c.get("language") == "en_US":
+            system += "\nFor this request, write cause and suggestion in English only. Keep cause within 80 characters and suggestion within 140 characters."
+        body = {"model":model,"messages":[{"role":"system","content":system},{"role":"user","content":prompt}],"max_tokens":2048,"stream":False,"response_format":{"type":"json_object"}}
         if urllib.parse.urlsplit(url).hostname == "api.deepseek.com" and "reasoner" not in model.lower():
             body["thinking"] = {"type":"disabled"}
         headers = {"Content-Type":"application/json","User-Agent":USER_AGENT}

@@ -2,6 +2,7 @@
 from PySide6.QtCore import Qt, QRectF
 from PySide6.QtGui import QImageReader, QPainter, QPainterPath, QPixmap
 from .themes import color
+from .i18n import tr
 from .widgets import Button
 
 

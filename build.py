@@ -16,8 +16,22 @@ if (root / ".build-env").is_dir():
 os.environ["PYINSTALLER_CONFIG_DIR"] = str(root / ".build-cache")
 os.chdir(str(root))
 import PyInstaller.__main__
+from PyInstaller.utils.win32.versioninfo import VSVersionInfo, FixedFileInfo, StringFileInfo, StringTable, StringStruct, VarFileInfo, VarStruct
+from launcher import __version__
+version_numbers = tuple(int(part) for part in __version__.split("."))
+version_numbers = (version_numbers + (0, 0, 0, 0))[:4]
 publisher = root / ".build-cache" / "publisher.json"
 publisher.parent.mkdir(parents=True, exist_ok=True)
+version_file = publisher.parent / "version-info.txt"
+version_info = VSVersionInfo(
+    ffi=FixedFileInfo(filevers=version_numbers, prodvers=version_numbers, mask=0x3f, flags=0,
+                      OS=0x40004, fileType=1, subtype=0, date=(0, 0)),
+    kids=[StringFileInfo([StringTable("040904B0", [
+        StringStruct("CompanyName", "星月晓梦"), StringStruct("FileDescription", "StarMoonLauncher - Minecraft Java Launcher"),
+        StringStruct("FileVersion", ".".join(map(str, version_numbers))), StringStruct("InternalName", "StarMoonLauncher"),
+        StringStruct("OriginalFilename", output_name + ".exe"), StringStruct("ProductName", "StarMoonLauncher"),
+        StringStruct("ProductVersion", __version__)])]), VarFileInfo([VarStruct("Translation", [1033, 1200])])])
+version_file.write_text(str(version_info), encoding="utf-8")
 settings_path = root / "publisher.json"
 settings = json.loads(settings_path.read_text(encoding="utf-8-sig")) if settings_path.is_file() else {}
 client_id = (os.environ.get("BLOCKCRAFT_MS_CLIENT_ID") or settings.get("microsoft_client_id", "")).strip()
@@ -27,6 +41,7 @@ publisher.write_text(json.dumps({"microsoft_client_id": client_id}), encoding="u
 PyInstaller.__main__.run([
     "--noconfirm", "--clean", "--onefile", "--windowed", "--name", output_name,
     "--icon", str(root / "assets" / "starmoon.ico"),
+    "--version-file", str(version_file),
     "--collect-all", "pymsalruntime",
     "--hidden-import", "msal.broker",
     "--paths", str(root / ".build-env"),

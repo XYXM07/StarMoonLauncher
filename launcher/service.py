@@ -12,6 +12,8 @@ from .game import GameManager
 from .diagnostics import Diagnostics, endpoint
 from .player_skins import PlayerSkins
 from .appearance import PRESET_IDS
+from . import __version__
+from .updater import UpdateManager
 
 
 class Application:
@@ -33,12 +35,13 @@ class Application:
         self.diagnostics = Diagnostics(self.store,self.game)
         self.diagnostic_jobs = {}
         self.game.on_exit = self.on_game_exit
+        self.updater = UpdateManager(self.store, self.net)
 
     def state(self):
         return {"config": self.store.public_config(), "instances": self.store.instances(),
                 "tasks": self.tasks.list(), "processes": self.game.process_status(),
                 "data_path": str(self.store.root), "minecraft_path": str(self.store.selected_minecraft()),
-                "minecraft_folders": self.store.folders(), "version": "0.7.5"}
+                "minecraft_folders": self.store.folders(), "version": __version__}
 
     def running_check(self, instance_id):
         if any(p["instance_id"] == instance_id and (p["running"] or not p.get("finalized",True)) for p in self.game.process_status()):
@@ -48,9 +51,13 @@ class Application:
         allowed = {"source", "memory", "memory_auto", "java_path", "java_auto", "width", "height", "jvm_args", "game_args", "client_id", "curseforge_key", "concurrency", "selected_instance", "selected_account", "theme", "animations", "login_mode", "offline_name", "background_path", "background_opacity", "glass_opacity", "glass_refraction", "download_parallel", "download_segments", "launcher_width", "launcher_height"}
         allowed.update(("color_scheme","ai_base_url","ai_model","ai_crash_analysis","ai_auto_preflight"))
         allowed.update(("background_mode","background_preset"))
+        allowed.add("language")
+        allowed.add("auto_check_updates")
         api_key = str(changes.get("ai_api_key","")).strip()
         clear_key = bool(changes.get("ai_clear_key",False))
         changes = {k: v for k, v in changes.items() if k in allowed}
+        if "language" in changes and changes["language"] not in ("zh_CN", "en_US"):
+            raise LauncherError("未知语言")
         if "background_path" in changes and "background_mode" not in changes:
             changes["background_mode"] = "custom" if str(changes["background_path"]).strip() else "none"
         if "background_mode" in changes and changes["background_mode"] not in ("default","preset","custom","none"):
@@ -59,7 +66,7 @@ class Application:
             raise LauncherError("未知预设壁纸")
         if "color_scheme" in changes and changes["color_scheme"] not in ("starmoon","aurora","morandi","graphite","glacier","twilight","night"):
             raise LauncherError("未知配色")
-        for key in ("ai_crash_analysis","ai_auto_preflight"):
+        for key in ("ai_crash_analysis","ai_auto_preflight","auto_check_updates"):
             if key in changes: changes[key] = bool(changes[key])
         if "ai_base_url" in changes:
             changes["ai_base_url"] = str(changes["ai_base_url"]).strip().rstrip("/")

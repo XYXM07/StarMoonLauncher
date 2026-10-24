@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / ".build-env"))
-from PySide6.QtCore import QAbstractAnimation, QEvent, QObject, QPoint, QPointF, Qt, QTimer
+from PySide6.QtCore import QAbstractAnimation, QEvent, QObject, QPoint, QPointF, QRectF, Qt, QTimer
 from PySide6.QtGui import QColor, QImage, QImageReader, QWheelEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QComboBox, QLineEdit, QMessageBox, QWidget
@@ -244,6 +244,36 @@ class NativeTests(unittest.TestCase):
         QTest.keyClick(row, Qt.Key_Return)
         self.assertEqual(self.window.page_id, "home")
         self.assertEqual(self.service.store.config()["selected_instance"], instance["id"])
+
+    def test_secondary_window_close_control_is_centered_and_clear_of_content(self):
+        for width, height in ((460, 300), (680, 540), (900, 650)):
+            dialog = self.window.open_dialog(NativeDialog(self.window, "二级窗口位置检查", width=width))
+            dialog.resize(width, height)
+            QTest.qWait(30)
+            close = dialog.findChild(Button, "window-close")
+            header = dialog.titlebar
+            # The painted glass excludes an asymmetric shadow, so the widget's
+            # rectangle is not the visible title bar's center.
+            visible_bar = QRectF(header.rect()).adjusted(4, 3, -4, -7)
+            self.assertAlmostEqual(QRectF(close.geometry()).center().y(), visible_bar.center().y(), delta=.5)
+            image = close.grab().toImage()
+            ink = []
+            for y in range(image.height()):
+                for x in range(image.width()):
+                    pixel = image.pixelColor(x, y)
+                    if pixel.red() < 210 and pixel.red() > pixel.green() + 40 and pixel.red() > pixel.blue() + 20:
+                        ink.append((x, y))
+            self.assertTrue(ink, "The close symbol was not rendered")
+            scale = image.height() / close.height()
+            ink_y = close.y() + (min(y for _, y in ink) + max(y for _, y in ink) + 1) / (2 * scale)
+            self.assertAlmostEqual(ink_y, visible_bar.center().y(), delta=.5)
+            ink_x = (min(x for x, _ in ink) + max(x for x, _ in ink) + 1) / (2 * image.width() / close.width())
+            self.assertAlmostEqual(ink_x, close.width() / 2, delta=.5)
+            self.assertLessEqual(close.mapTo(dialog, QPoint()).y(), 12)
+            self.assertLessEqual(header.geometry().bottom(), dialog.scroll.geometry().top())
+            self.assertEqual(close.accessibleName(), "关闭")
+            QTest.mouseClick(close, Qt.LeftButton)
+            self.assertFalse(dialog.isVisible())
 
     def test_custom_background_is_copied_and_applied_immediately(self):
         source = self.root / "custom.png"
@@ -544,6 +574,108 @@ class NativeTests(unittest.TestCase):
         self.window.library_folders.setCurrentIndex(0)
         wait_for(lambda: self.window.data["minecraft_path"] == str(self.service.store.minecraft_root))
         self.assertFalse(self.window.page.findChildren(VersionRow))
+
+    def test_scan_folders_selects_multiple_roots_and_keeps_original_game_files(self):
+        from launcher.core import atomic_json
+        base = self.root / "扫描范围"
+        roots = [base / "整合包 A/.Minecraft", base / "游戏 B/.minecraft"]
+        for original in roots:
+            version = original / "versions/1.20.1"
+            version.mkdir(parents=True)
+            atomic_json(version / "1.20.1.json", {"id": "1.20.1", "mainClass": "Main", "libraries": []})
+            (version / "1.20.1.jar").write_bytes(b"original")
+        empty = base / "空目录/.minecraft"
+        empty.mkdir(parents=True)
+        self.window.navigate("library", animated=False)
+        scan = self.window.sidebar.findChild(Button, "scan-minecraft-folders")
+        with patch("launcher.folder_scan.local_scan_roots", return_value=[base]):
+            QTest.mouseClick(scan, Qt.LeftButton)
+            dialog = next(d for d in self.window.dialogs if d.objectName() == "minecraft-folder-scan")
+            wait_for(lambda: dialog.results.count() == 3)
+        self.assertEqual(len(dialog.selected_paths()), 2)
+        self.assertFalse(self.service.store.config()["minecraft_folders"])
+        dialog.select_all.setChecked(False)
+        self.assertFalse(dialog.add.isEnabled())
+        dialog.select_all.setChecked(True)
+        self.assertEqual(len(dialog.selected_paths()), 2)
+        QTest.mouseClick(dialog.add, Qt.LeftButton)
+        wait_for(lambda: len(self.service.store.config()["minecraft_folders"]) == 2)
+        wait_for(lambda: not dialog.isVisible())
+        self.assertEqual(self.window.page_id, "library")
+        external = [instance for instance in self.service.store.instances() if instance.get("external_minecraft")]
+        self.assertEqual(len(external), 2)
+        self.assertEqual({self.service.store.game_dir(instance["id"]) for instance in external}, set(roots))
+        self.assertFalse((empty / "versions").exists())
+        self.assertTrue(all((root / "versions/1.20.1/1.20.1.jar").read_bytes() == b"original" for root in roots))
+        # A second scan marks registered folders and never adds duplicate entries.
+        with patch("launcher.folder_scan.local_scan_roots", return_value=[base]):
+            again = self.window.scan_minecraft_folders()
+            wait_for(lambda: again.results.count() == 3)
+        self.assertFalse(again.selected_paths())
+        self.assertFalse(again.add.isEnabled())
+        self.assertEqual(sum("已添加" in again.results.item(i).text() for i in range(3)), 2)
+        again.reject()
+
+    def test_scan_stop_close_and_scope_selection_keep_interface_responsive(self):
+        from launcher.folder_scan import MinecraftFolderScanner
+        actual_run = MinecraftFolderScanner.run
+
+        def delayed_run(scanner):
+            scanner.cancelled.wait(3)
+            return actual_run(scanner)
+
+        with patch("launcher.folder_scan.local_scan_roots", return_value=[self.root]), patch.object(MinecraftFolderScanner, "run", delayed_run):
+            dialog = self.window.scan_minecraft_folders()
+            QTest.mouseClick(dialog.stop, Qt.LeftButton)
+            wait_for(lambda: dialog.all_disks.isEnabled())
+            self.assertIn("已停止", dialog.status.text())
+            self.assertTrue(dialog.scanner.cancelled.is_set())
+        empty = self.root / "指定目录/.minecraft"
+        (empty / "versions").mkdir(parents=True)
+        with patch("launcher.desktop.QFileDialog.getExistingDirectory", return_value=str(empty.parent)):
+            QTest.mouseClick(dialog.choose_scope, Qt.LeftButton)
+            wait_for(lambda: dialog.results.count() == 1)
+        self.assertEqual(dialog.selected_paths(), [str(empty)])
+        dialog.resize(460, 420)
+        QTest.qWait(30)
+        self.assertEqual(dialog.scope.full_text, str(empty.parent))
+        self.assertEqual(dialog.scope.toolTip(), str(empty.parent))
+        self.assertTrue(dialog.scope.text())
+        self.assertNotEqual(dialog.scope.text(), "本机磁盘")
+        dialog.reject()
+        with patch("launcher.folder_scan.local_scan_roots", return_value=[self.root]), patch.object(MinecraftFolderScanner, "run", delayed_run):
+            closing = self.window.scan_minecraft_folders()
+            closing.reject()
+            wait_for(lambda: closing.scanner.snapshot()["complete"])
+            self.assertTrue(closing.scanner.cancelled.is_set())
+        self.assertFalse(self.service.store.config()["minecraft_folders"])
+
+    def test_scan_batch_import_retains_successes_and_reports_failed_folders(self):
+        from launcher.core import LauncherError, atomic_json
+        from launcher.folders import add_folder
+        base = self.root / "扫描范围"
+        first, second = base / "A/.minecraft", base / "B/.minecraft"
+        for original in (first, second):
+            path = original / "versions/1.20.1/1.20.1.json"
+            atomic_json(path, {"id": "1.20.1", "mainClass": "Main", "libraries": []})
+
+        def import_one(manager, path, select=True):
+            if Path(path) == second:
+                raise LauncherError("文件夹已被移动")
+            return add_folder(manager, path, select)
+
+        with patch("launcher.folder_scan.local_scan_roots", return_value=[base]):
+            dialog = self.window.scan_minecraft_folders()
+            wait_for(lambda: dialog.results.count() == 2)
+        with patch("launcher.folders.add_folder", side_effect=import_one):
+            QTest.mouseClick(dialog.add, Qt.LeftButton)
+            wait_for(lambda: "文件夹已被移动" in dialog.error_label.text())
+        self.assertEqual(self.service.store.config()["minecraft_folders"], [str(first)])
+        self.assertEqual(dialog.selected_paths(), [str(second)])
+        self.assertTrue(dialog.add.isEnabled())
+        QTest.mouseClick(dialog.add, Qt.LeftButton)
+        wait_for(lambda: not dialog.isVisible())
+        self.assertEqual(len(self.service.store.config()["minecraft_folders"]), 2)
 
     def test_dropdown_search_keyboard_and_no_orphan_popup(self):
         from launcher.combobox import GlassComboBox

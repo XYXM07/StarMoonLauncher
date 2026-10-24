@@ -103,26 +103,65 @@ class Accounts:
                 session["cancel"].set()
             return {key: value for key, value in session.items() if key != "cancel"}
 
-    def _exchange(self, token, client_id, auth_metadata=None):
+    def _auth_request(self, stage, url, data=None, headers=None):
         try:
-            xbox = request_json("https://user.auth.xboxlive.com/user/authenticate", {
-                "Properties": {"AuthMethod": "RPS", "SiteName": "user.auth.xboxlive.com", "RpsTicket": "d=" + token["access_token"]},
-                "RelyingParty": "http://auth.xboxlive.com", "TokenType": "JWT"})
-            xsts = request_json("https://xsts.auth.xboxlive.com/xsts/authorize", {
-                "Properties": {"SandboxId": "RETAIL", "UserTokens": [xbox["Token"]]},
-                "RelyingParty": "rp://api.minecraftservices.com/", "TokenType": "JWT"})
-            uhs = xsts["DisplayClaims"]["xui"][0]["uhs"]
-            minecraft = request_json("https://api.minecraftservices.com/authentication/login_with_xbox", {
-                "identityToken": "XBL3.0 x={};{}".format(uhs, xsts["Token"])})
-            headers = {"Authorization": "Bearer " + minecraft["access_token"]}
-            entitlements = request_json("https://api.minecraftservices.com/entitlements/mcstore", headers=headers)
-            if not entitlements.get("items"):
-                raise LauncherError("该微软账号没有可用的 Minecraft Java 版授权")
-            profile = request_json("https://api.minecraftservices.com/minecraft/profile", headers=headers)
+            return request_json(url, data, headers=headers)
         except urllib.error.HTTPError as exc:
-            if exc.code in (401, 403, 404):
-                raise LauncherError("Xbox / Minecraft 授权失败。请确认拥有 Java 版、已建立 Xbox 档案，且此 Client ID 获准访问 Minecraft API；儿童账号还需家长许可")
-            raise LauncherError("微软游戏服务暂时不可用（HTTP {}）".format(exc.code))
+            # Only retain bounded diagnostic codes, never response bodies,
+            # requests, account details or any of the authentication tokens.
+            status, code, registration = exc.code, "", False
+            try:
+                raw = exc.read(8192).decode("utf-8", errors="replace")
+                registration = "invalid app registration" in raw.lower()
+                response = json.loads(raw)
+                if isinstance(response, dict):
+                    xerr = response.get("XErr")
+                    if type(xerr) is int and 0 <= xerr <= 0xffffffff:
+                        code = "XErr=" + str(xerr)
+                    else:
+                        error = response.get("error")
+                        if error in ("invalid_request", "invalid_grant", "invalid_client", "access_denied", "unauthorized_client",
+                                     "Unauthorized", "Forbidden", "NotFound", "ForbiddenOperationException"):
+                            code = error
+            except (OSError, ValueError, TypeError, AttributeError):
+                pass
+            finally:
+                exc.close()
+            if stage == "Minecraft 登录" and status == 403 and registration:
+                code = "Invalid app registration"
+                suggestion = "Minecraft 服务拒绝此应用注册，请检查启动器应用 ID 的 Minecraft API 访问审批。"
+            elif stage == "Java 版玩家档案" and status == 404:
+                suggestion = "未找到 Java 版玩家档案，请先在官方启动器确认游戏授权并创建玩家名。"
+            elif status == 401:
+                suggestion = "服务拒绝当前凭据，请重新登录后重试，并保留此错误码。"
+            elif status == 403:
+                suggestion = "服务拒绝此请求，请结合失败接口和错误码检查账号或应用权限。"
+            else:
+                suggestion = "认证服务请求失败，请保留此错误码后重试。"
+            message = "{}失败（HTTP {}{}）\n{}\n接口：{}".format(stage, status, " · " + code if code else "", suggestion, url)
+            try:
+                atomic_json(self.store.root / "auth-last-error.json", {
+                    "time": time.time(), "stage": stage, "endpoint": url,
+                    "http_status": status, "error_code": code, "suggestion": suggestion})
+            except OSError:
+                pass
+            raise LauncherError(message) from None
+
+    def _exchange(self, token, client_id, auth_metadata=None):
+        xbox = self._auth_request("Xbox Live 登录", "https://user.auth.xboxlive.com/user/authenticate", {
+            "Properties": {"AuthMethod": "RPS", "SiteName": "user.auth.xboxlive.com", "RpsTicket": "d=" + token["access_token"]},
+            "RelyingParty": "http://auth.xboxlive.com", "TokenType": "JWT"})
+        xsts = self._auth_request("Xbox XSTS 授权", "https://xsts.auth.xboxlive.com/xsts/authorize", {
+            "Properties": {"SandboxId": "RETAIL", "UserTokens": [xbox["Token"]]},
+            "RelyingParty": "rp://api.minecraftservices.com/", "TokenType": "JWT"})
+        uhs = xsts["DisplayClaims"]["xui"][0]["uhs"]
+        minecraft = self._auth_request("Minecraft 登录", "https://api.minecraftservices.com/authentication/login_with_xbox", {
+            "identityToken": "XBL3.0 x={};{}".format(uhs, xsts["Token"])})
+        headers = {"Authorization": "Bearer " + minecraft["access_token"]}
+        entitlements = self._auth_request("Java 版授权检查", "https://api.minecraftservices.com/entitlements/mcstore", headers=headers)
+        if not entitlements.get("items"):
+            raise LauncherError("该微软账号没有可用的 Minecraft Java 版授权")
+        profile = self._auth_request("Java 版玩家档案", "https://api.minecraftservices.com/minecraft/profile", headers=headers)
         account = {"id": profile["id"], "name": profile["name"], "type": "microsoft"}
         credentials = {"access_token": minecraft["access_token"],
             "expires": time.time() + minecraft.get("expires_in", 86400) - 120,

@@ -4,6 +4,7 @@ from PySide6.QtGui import QColor, QLinearGradient, QPainter, QPainterPath, QPen,
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QComboBox, QFrame, QLineEdit,
                                QListView, QStyledItemDelegate, QStyle, QVBoxLayout, QLayout, QSizePolicy)
 from .material import paint_glass
+from .i18n import tr
 from .themes import color, palette
 
 
@@ -92,7 +93,7 @@ class GlassComboBox(QComboBox):
         self.proxy.setFilterCaseSensitivity(Qt.CaseInsensitive)
         self.proxy.setFilterKeyColumn(0)
         self.search = QLineEdit(self.popup)
-        self.search.setPlaceholderText("搜索选项…")
+        self.search.setPlaceholderText(tr("搜索选项…"))
         self.search.textChanged.connect(self.proxy.setFilterFixedString)
         self.search.installEventFilter(self)
         self.menu = QListView(self.popup)

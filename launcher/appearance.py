@@ -1,6 +1,7 @@
 """Wallpaper selection independent of a developer machine's absolute paths."""
 import sys
 from pathlib import Path
+from .i18n import tr
 
 
 BACKGROUND_PRESETS = (
@@ -38,5 +39,5 @@ def wallpaper_path(config):
 def wallpaper_label(config):
     if wallpaper_mode(config) == "preset":
         name = next((item[1] for item in BACKGROUND_PRESETS if item[0] == config.get("background_preset")), BACKGROUND_PRESETS[0][1])
-        return "预设壁纸 · "+name
-    return {"default":"默认壁纸 · 背景图.jpg","none":"无壁纸","custom":"自定义壁纸"}.get(wallpaper_mode(config),"默认壁纸")
+        return tr("预设壁纸 · ")+tr(name)
+    return tr({"default":"默认壁纸 · 背景图.jpg","none":"无壁纸","custom":"自定义壁纸"}.get(wallpaper_mode(config),"默认壁纸"))

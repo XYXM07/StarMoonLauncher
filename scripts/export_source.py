@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
 from launcher import __version__
 
-FILES = ("README.md","requirements.txt","requirements-dev.txt",
+FILES = ("README.md","README.en.md","requirements.txt","requirements-dev.txt",
          "main.py","build.py","publisher.json",
          ".gitignore",".gitattributes",".editorconfig")
 DIRECTORIES = ("launcher","tests","assets","licenses","docs","scripts",".github")

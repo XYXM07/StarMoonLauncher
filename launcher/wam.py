@@ -6,6 +6,7 @@ import threading
 from pathlib import Path
 
 from .core import Cancelled, LauncherError, atomic_json, protect, read_json, unprotect
+from . import __version__
 
 AUTHORITY = "https://login.microsoftonline.com/consumers"
 SCOPES = ["XboxLive.signin"]
@@ -44,7 +45,7 @@ class WamBroker:
             client = msal.PublicClientApplication(
                 client_id, authority=AUTHORITY, token_cache=cache,
                 enable_broker_on_windows=True, enable_pii_log=False,
-                app_name="StarMoon", app_version="0.7.5", timeout=25)
+                app_name="StarMoon", app_version=__version__, timeout=25)
             self.clients[client_id] = (client, cache)
         return self.clients[client_id]
 

@@ -1,6 +1,8 @@
 """Apply independent settings immediately and debounce editable text/disk writes."""
 from PySide6.QtWidgets import QComboBox, QLineEdit, QPlainTextEdit, QSpinBox
+from PySide6.QtCore import QTimer
 from .slider_ui import GlassSlider
+from .i18n import tr
 
 
 APPEARANCE_FIELDS = {"color_scheme","background_path","background_mode","background_preset","background_opacity","glass_opacity","glass_refraction"}
@@ -102,14 +104,17 @@ class LiveSettings:
                 field.blockSignals(False)
                 field.setPlaceholderText("API Key")
             elif key in ("ai_api_key","curseforge_key") and value:
-                self.settings_fields[key].setPlaceholderText("已保存；留空保留")
+                self.settings_fields[key].setPlaceholderText(tr("已保存；留空保留"))
             if key in APPEARANCE_FIELDS or key in ("animations","launcher_width","launcher_height"):
                 self.apply_setting_effects(key)
+            if key == "language":
+                # Rebuild after the combo's signal finishes, keeping its sender alive.
+                QTimer.singleShot(0, self.apply_ui_language)
             return True
         except Exception as exc:
             message = str(exc)
             if self.setting_errors.get(key) != message:
-                self.toast("此项设置未应用："+message,True)
+                self.toast(tr("此项设置未应用：")+message,True)
             self.setting_errors[key] = message
             return False
 
@@ -141,6 +146,6 @@ class LiveSettings:
         except Exception as exc:
             message = str(exc)
             if self.setting_errors.get(error_key) != message:
-                self.toast("版本设置未应用："+message,True)
+                self.toast(tr("版本设置未应用：")+message,True)
             self.setting_errors[error_key] = message
             return False

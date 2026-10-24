@@ -6,11 +6,15 @@
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
-回归覆盖账号加密、WAM 调用、下载、版本管理、模组依赖扫描、诊断回答解析、多进程运行、离线皮肤、原生控件、壁纸及持久化。网络场景使用模拟响应或本机临时服务；不读取实际游戏目录、使用玩家密钥或下载 Minecraft。
+回归覆盖账号加密、WAM 调用、下载、版本管理、文件夹扫描与批量添加、模组依赖扫描、诊断回答解析、多进程运行、离线皮肤、原生控件、壁纸及持久化。网络场景使用模拟响应或本机临时服务；不读取实际游戏目录、使用玩家密钥或下载 Minecraft。扫描测试仅遍历临时夹具，不扫描开发者的实际磁盘。
 
-当前版本包含 137 项原生启动器相关测试。
+0.7.6 源码包含 194 项原生启动器相关测试，覆盖自动更新、中英文切换、扫描功能、二级窗口标题栏调整和登录错误分阶段诊断。
 
-2026-10-23 整理后完整回归：137 项全部通过，耗时 77.150 秒。本机日志为 `test-results/source-cleanup-tests.log`；日志不随源码上传。
+语言回归覆盖翻译模板、动态错误码、全部主页面和设置分类、二级窗口、语言即时切换、重启记忆，以及玩家名、版本名、路径和设置草稿保持原值。
+
+更新回归覆盖正式版本筛选、防降级、固定来源、下载限制和校验、取消、进程等待、文件占用重试、失败恢复、数据保持与安装时机。真实单文件更新辅助进程验收见 [UPDATING.md](UPDATING.md)。
+
+本机 0.7.6 完整回归日志为 `test-results/release-regression-0.7.6.log`，自动替换验收记录见 `test-results/auto-update-acceptance.json`；日志不随源码上传。Windows DPAPI 相关用例需要在正常 Windows 用户权限下运行。
 
 ## 原生界面预览
 
@@ -25,10 +29,10 @@
 构建后执行：
 
 ```powershell
-.\.venv\Scripts\python.exe tests/verify_release.py dist/星月启动器-0.7.5.exe
+.\.venv\Scripts\python.exe tests/verify_release.py dist/StarMoonLauncher-0.7.6-windows-x64.exe
 ```
 
-检查资源、模块、图标、WAM DLL，并将 EXE 复制到独立临时目录启动，验证默认紧凑尺寸、不自动创建游戏目录、透明四角、预设壁纸切换和多次重开保持选择。它会启动自己的测试窗口并自动退出，结果位于 `test-results/release-verification.json`。
+检查 Windows 文件版本、资源、模块、图标、WAM DLL，并将 EXE 复制到独立临时目录启动，验证默认紧凑尺寸、不自动创建游戏目录、透明四角、预设壁纸切换，以及英文界面和语言选择在多次解包重启后保持。它会启动自己的测试窗口并自动退出，结果位于 `test-results/release-verification.json`。
 
 ## 可选真实网络测试
 

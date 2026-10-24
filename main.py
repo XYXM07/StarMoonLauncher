@@ -40,11 +40,26 @@ def main():
     parser.add_argument("--data-dir", default="")
     parser.add_argument("--smoke-test", action="store_true", help="用于自动化验收，启动窗口后自动退出")
     parser.add_argument("--screenshot", default="", help=argparse.SUPPRESS)
+    parser.add_argument("--apply-update", default="", help=argparse.SUPPRESS)
     args = parser.parse_args()
     frozen = getattr(sys, "frozen", False)
     root = Path(sys.executable).parent if frozen else Path(__file__).resolve().parent
     if not frozen and (root / ".build-env").is_dir():
         sys.path.insert(0, str(root / ".build-env"))
+    if args.apply_update:
+        if not frozen or os.name != "nt":
+            return 1
+        try:
+            from launcher.update_install import apply_install, launch_executable
+            if args.smoke_test:
+                # Existing isolated acceptance mode also exercises the real helper.
+                def launch_test(executable, arguments):
+                    extra = ["--smoke-test"] + (["--screenshot", args.screenshot] if args.screenshot else [])
+                    return launch_executable(executable, list(arguments) + extra)
+                return 0 if apply_install(args.apply_update, helper=sys.executable, launch=launch_test) else 1
+            return 0 if apply_install(args.apply_update, helper=sys.executable) else 1
+        except Exception:
+            return 1
     publisher = Path(getattr(sys, "_MEIPASS", root)) / "publisher.json"
     if publisher.is_file():
         config = json.loads(publisher.read_text(encoding="utf-8"))
@@ -54,7 +69,8 @@ def main():
     lock = acquire_lock(data_root)
     if lock is None:
         if os.name == "nt":
-            window = ctypes.windll.user32.FindWindowW(None, "星月启动器") or ctypes.windll.user32.FindWindowW(None, "BlockCraft · 我的世界 Java 启动器")
+            window = (ctypes.windll.user32.FindWindowW(None, "星月启动器") or ctypes.windll.user32.FindWindowW(None, "StarMoonLauncher")
+                      or ctypes.windll.user32.FindWindowW(None, "BlockCraft · 我的世界 Java 启动器"))
             if window:
                 ctypes.windll.user32.ShowWindow(window, 9)
                 ctypes.windll.user32.SetForegroundWindow(window)
@@ -70,7 +86,11 @@ def main():
         result = run_desktop(data_root, minecraft_root=minecraft_root, quit_after=3 if args.smoke_test else 0, screenshot=args.screenshot)
         if args.smoke_test:
             from launcher.core import atomic_json
-            atomic_json(data_root / "native-smoke-result.json", {"success": result == 0, "native": True, "wam_runtime": True, "version": "0.7.5", "minecraft_path": str(minecraft_root)})
+            from launcher.i18n import language
+            from launcher import __version__
+            from PySide6.QtWidgets import QApplication
+            atomic_json(data_root / "native-smoke-result.json", {"success": result == 0, "native": True, "wam_runtime": True, "version": __version__, "minecraft_path": str(minecraft_root),
+                        "language": language(), "display_name": QApplication.applicationDisplayName()})
         return result
     except Exception:
         import traceback

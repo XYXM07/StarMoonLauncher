@@ -9,7 +9,7 @@ import uuid
 from pathlib import Path
 from shiboken6 import isValid
 
-from PySide6.QtCore import (QEasingCurve, QObject, QPoint, QRunnable, Qt, QThreadPool,
+from PySide6.QtCore import (QEasingCurve, QObject, QPoint, QRunnable, Qt, QThreadPool, QLocale,
                             QTimer, QUrl, Signal, QPropertyAnimation)
 from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont, QIcon, QImageReader, QPainter, QPalette, QPixmap, QPolygonF
 from PySide6.QtWidgets import (QApplication, QButtonGroup, QRadioButton, QCheckBox, QComboBox, QDialog, QFileDialog,
@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (QApplication, QButtonGroup, QRadioButton, QCheckB
                                QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QSystemTrayIcon,
                                QSizePolicy, QSpinBox, QVBoxLayout, QWidget)
 
+from .i18n import LANGUAGES, language, set_language, tr
 from .core import LauncherError, read_json, safe_path
 from .images import ImageLoader, ProjectPreview
 from .glass import (GlassSurface, MoonScene, TitleBar, clear_window, enable_backdrop,
@@ -33,6 +34,8 @@ from .service import Application
 from .live_settings import LiveSettings
 from .appearance import BACKGROUND_PRESETS, preset_background, wallpaper_mode, wallpaper_path, wallpaper_label
 from .wallpaper_ui import WallpaperTile
+from .folder_scan import MinecraftFolderScanner
+from . import __version__
 from .widgets import Button, ElidedLabel, GlassFrame, NavigationSwitch, PageHost, SmoothScroll, STYLE, SummaryLabel, VersionRow, WheelRouter, card, glass_style, label, remove_focus_rings
 
 PAGES = [("home", "", "启动"), ("library", "", "版本选择"),
@@ -52,7 +55,9 @@ def human_bytes(value):
 
 
 def short_count(value):
-    return "{:.1f} 万".format(value/10000) if value >= 10000 else str(value)
+    if language() == "en_US":
+        return "{:.1f}M".format(value/1000000) if value >= 1000000 else "{:.1f}K".format(value/1000) if value >= 1000 else str(value)
+    return tr("{:.1f} 万").format(value/10000) if value >= 10000 else str(value)
 
 
 def row(*widgets):
@@ -75,7 +80,7 @@ def field(title, widget):
     layout = QVBoxLayout(container)
     layout.setContentsMargins(0, 0, 0, 0)
     layout.setSpacing(7)
-    layout.addWidget(label(title, "fieldLabel"))
+    layout.addWidget(label(tr(title), "fieldLabel"))
     layout.addWidget(widget)
     return container
 
@@ -91,7 +96,7 @@ def text_input(value="", placeholder="", name=""):
 def combo(items, selected=None, name=""):
     widget = GlassComboBox()
     for value, text in items:
-        widget.addItem(text, value)
+        widget.addItem(tr(text), value)
     if selected is not None:
         index = widget.findData(selected)
         if index >= 0:
@@ -107,7 +112,7 @@ def notice(text):
     layout = QHBoxLayout(frame)
     layout.setContentsMargins(16, 12, 16, 12)
     layout.addWidget(label("ⓘ"))
-    content = label(text, "muted", True)
+    content = label(tr(text), "muted", True)
     layout.addWidget(content, 1)
     return frame
 
@@ -115,9 +120,9 @@ def notice(text):
 def empty(title, description, button=None):
     frame, layout = card()
     frame.setMinimumHeight(175)
-    title_label = label(title, "section")
+    title_label = label(tr(title), "section")
     title_label.setAlignment(Qt.AlignCenter)
-    detail = label(description, "muted", True)
+    detail = label(tr(description), "muted", True)
     detail.setAlignment(Qt.AlignCenter)
     layout.addStretch()
     layout.addWidget(title_label)
@@ -169,6 +174,7 @@ class NativeDialog(QDialog):
         outer.setContentsMargins(6, 6, 6, 6)
         outer.setSpacing(0)
         titlebar = TitleBar(self, title)
+        self.titlebar = titlebar
         titlebar.layout.addStretch()
         titlebar.add_controls()
         outer.addWidget(titlebar)
@@ -179,7 +185,7 @@ class NativeDialog(QDialog):
         self.footer = QHBoxLayout()
         self.footer.setContentsMargins(26, 12, 26, 18)
         self.footer.addStretch()
-        self.footer.addWidget(Button("关闭", self.reject))
+        self.footer.addWidget(Button(tr("关闭"), self.reject))
         outer.addLayout(self.footer)
         self.error_label = label("", "muted", True)
         self.error_label.setStyleSheet("color:" + theme_color("danger").name())
@@ -216,29 +222,241 @@ class NativeDialog(QDialog):
         return (True, hit) if hit is not None else super().nativeEvent(event_type, message)
 
     def error(self, text):
-        self.error_label.setText(text)
+        self.error_label.setText(tr(text))
         self.error_label.setVisible(bool(text))
         self.scroll.ensureWidgetVisible(self.error_label)
+
+
+class MinecraftScanDialog(NativeDialog):
+    def __init__(self, window):
+        super().__init__(window, tr("扫描 .minecraft 文件夹"), width=680)
+        self.setObjectName("minecraft-folder-scan")
+        self.resize(min(680, window.width()), min(540, window.height()))
+        self.body.setContentsMargins(22, 12, 22, 10)
+        self.body.setSpacing(10)
+        self.scanner = None
+        self.scan_result = None
+        self.importing = False
+        self.closed = False
+        self.scope = ElidedLabel(tr("本机磁盘"), "muted")
+        self.scope.setObjectName("scan-scope")
+        self.body.addWidget(self.scope)
+        self.all_disks = Button(tr("扫描本机"), lambda: self.start())
+        self.choose_scope = Button(tr("指定目录"), self.choose_directory)
+        self.stop = Button(tr("停止扫描"), self.stop_scan)
+        self.stop.setObjectName("stop-folder-scan")
+        self.body.addLayout(row(self.all_disks, self.choose_scope, None, self.stop))
+        self.status = label(tr("准备扫描"), "muted", True)
+        self.status.setObjectName("folder-scan-status")
+        self.current = ElidedLabel("", "muted")
+        self.progress = GlassProgress()
+        self.body.addWidget(self.status)
+        self.body.addWidget(self.current)
+        self.body.addWidget(self.progress)
+        self.results = QListWidget()
+        self.results.setObjectName("folder-scan-results")
+        self.results.setMinimumHeight(140)
+        self.results.setTextElideMode(Qt.ElideMiddle)
+        self.results.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.results.setVerticalScrollMode(QListWidget.ScrollPerPixel)
+        self.results.itemChanged.connect(self.update_selection)
+        self.body.addWidget(self.results)
+        self.select_all = QCheckBox(tr("全选"))
+        self.select_all.setObjectName("select-all-folders")
+        self.select_all.toggled.connect(self.toggle_all)
+        self.footer.insertWidget(0, self.select_all)
+        self.add = Button(tr("添加所选"), self.add_selected, True)
+        self.add.setObjectName("add-scanned-folders")
+        self.add.setEnabled(False)
+        self.footer.addWidget(self.add)
+        self.poll = QTimer(self)
+        self.poll.setInterval(150)
+        self.poll.timeout.connect(self.update_progress)
+        self.finished.connect(self.shutdown)
+
+    def start(self, roots=None):
+        if self.closed or self.importing or (self.scanner and not self.scanner.snapshot()["complete"]):
+            return
+        self.scanner = MinecraftFolderScanner(roots)
+        self.scan_result = None
+        self.scope.setText(" · ".join(str(root) for root in self.scanner.roots) or tr("没有可扫描的本机磁盘"))
+        self.results.clear()
+        self.error("")
+        self.select_all.setChecked(False)
+        self.select_all.setEnabled(False)
+        self.add.setEnabled(False)
+        self.all_disks.setEnabled(False)
+        self.choose_scope.setEnabled(False)
+        self.stop.setEnabled(True)
+        self.progress.setRange(0, 0)
+        self.update_progress()
+        self.poll.start()
+        self.window.async_call(self.scanner.run, self.scan_finished, self.scan_failed)
+
+    def choose_directory(self):
+        path = QFileDialog.getExistingDirectory(self, tr("选择扫描目录"))
+        if path:
+            self.start([path])
+
+    def stop_scan(self):
+        if self.scanner:
+            self.scanner.cancel()
+            self.stop.setEnabled(False)
+            self.status.setText(tr("正在停止扫描…"))
+
+    def update_progress(self):
+        if not self.scanner or self.closed:
+            return
+        state = self.scanner.snapshot()
+        self.status.setText(tr("{} · 已检查 {} 个目录 · 找到 {} 个文件夹").format(
+            tr("正在停止") if state["cancelled"] else tr("正在扫描"), state["visited"], state["found"]))
+        self.current.setText(state["current"])
+        self.current.show()
+
+    def scan_failed(self, message):
+        if self.closed:
+            return
+        self.poll.stop()
+        self.scanner = None
+        self.progress.setRange(0, 100)
+        self.progress.setValue(0)
+        self.stop.setEnabled(False)
+        self.all_disks.setEnabled(True)
+        self.choose_scope.setEnabled(True)
+        self.status.setText(tr("扫描未完成，可重新扫描"))
+        self.error(message)
+
+    def scan_finished(self, result):
+        if self.closed:
+            return
+        from .folders import folder_key
+        self.scan_result = result
+        self.poll.stop()
+        self.stop.setEnabled(False)
+        self.all_disks.setEnabled(True)
+        self.choose_scope.setEnabled(True)
+        self.progress.setRange(0, 100)
+        self.progress.setValue(0 if result["cancelled"] else 100)
+        self.results.clear()
+        registered = {folder_key(item["path"]) for item in self.window.service.store.folders()}
+        for folder in result["folders"]:
+            added = folder_key(folder["path"]) in registered
+            detail = tr("已添加") if added else tr("{} 个版本").format(folder["versions"]) if folder["available"] else tr(folder["issue"])
+            item = QListWidgetItem(folder["path"] + "\n" + detail)
+            item.setToolTip(folder["path"])
+            item.setData(Qt.UserRole, folder)
+            selectable = folder["available"] and not added
+            item.setFlags((Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsUserCheckable) if selectable else Qt.NoItemFlags)
+            if selectable:
+                item.setCheckState(Qt.Checked)
+            self.results.addItem(item)
+        self.status.setText(tr("{} · 找到 {} 个文件夹 · 跳过 {} 个不可访问目录").format(
+            tr("扫描已停止") if result["cancelled"] else tr("扫描完成"), len(result["folders"]), result["skipped"]))
+        self.current.setText("" if result["folders"] else tr("未找到 .minecraft 文件夹，可以指定其他目录重新扫描"))
+        self.current.setVisible(not result["folders"])
+        self.scroll.verticalScrollBar().setValue(0)
+        self.update_selection()
+
+    def selected_paths(self):
+        return [self.results.item(index).data(Qt.UserRole)["path"] for index in range(self.results.count())
+                if self.results.item(index).checkState() == Qt.Checked]
+
+    def update_selection(self, *_):
+        eligible = [self.results.item(index) for index in range(self.results.count())
+                    if self.results.item(index).flags() & Qt.ItemIsUserCheckable]
+        selected = self.selected_paths()
+        self.select_all.blockSignals(True)
+        self.select_all.setChecked(bool(eligible) and len(selected) == len(eligible))
+        self.select_all.blockSignals(False)
+        self.select_all.setEnabled(bool(eligible) and not self.importing)
+        self.add.setText(tr("添加所选 ({})").format(len(selected)))
+        self.add.setEnabled(bool(selected) and not self.importing)
+
+    def toggle_all(self, checked):
+        self.results.blockSignals(True)
+        for index in range(self.results.count()):
+            item = self.results.item(index)
+            if item.flags() & Qt.ItemIsUserCheckable:
+                item.setCheckState(Qt.Checked if checked else Qt.Unchecked)
+        self.results.blockSignals(False)
+        self.update_selection()
+
+    def add_selected(self):
+        paths = self.selected_paths()
+        if not paths or self.importing:
+            return
+        self.importing = True
+        self.update_selection()
+        self.results.setEnabled(False)
+        self.all_disks.setEnabled(False)
+        self.choose_scope.setEnabled(False)
+        self.status.setText(tr("正在添加 {} 个文件夹…").format(len(paths)))
+
+        def operation():
+            from .folders import add_folder
+            added, errors = [], []
+            for path in paths:
+                try:
+                    added.append(add_folder(self.window.service.game, path, select=False))
+                except (LauncherError, OSError, ValueError) as exc:
+                    errors.append(path + "：" + tr(str(exc)))
+            if added:
+                self.window.service.store.save({"library_root": added[0]["path"]})
+            return {"added": added, "errors": errors}
+
+        def complete(result):
+            self.importing = False
+            self.window.data = self.window.service.state()
+            if not self.closed:
+                self.window.navigate("library", False)
+                if result["errors"]:
+                    self.results.setEnabled(True)
+                    self.scan_finished(self.scan_result)
+                    self.error("\n".join(result["errors"]))
+                else:
+                    self.accept()
+            message = tr("已添加 {} 个文件夹 · {} 个版本").format(len(result["added"]), sum(len(item["instances"]) for item in result["added"]))
+            skipped = sum(len(item.get("skipped", [])) for item in result["added"])
+            if skipped:
+                message += tr(" · {} 个版本需修复").format(skipped)
+            self.window.toast(message, bool(result["errors"]))
+
+        def failed(message):
+            self.importing = False
+            if not self.closed:
+                self.results.setEnabled(True)
+                self.all_disks.setEnabled(True)
+                self.choose_scope.setEnabled(True)
+                self.update_selection()
+                self.error(message)
+
+        self.window.async_call(operation, complete, failed)
+
+    def shutdown(self, *_):
+        self.closed = True
+        self.poll.stop()
+        if self.scanner:
+            self.scanner.cancel()
 
 
 class SkinDialog(NativeDialog):
     def __init__(self,window,account_id):
         self.account_id = account_id
         account = window.service.skins.account(account_id)
-        super().__init__(window,account["name"]+" · 离线皮肤",width=570)
+        super().__init__(window,account["name"]+tr(" · 离线皮肤"),width=570)
         self.body.setSpacing(10)
         self.pending_path = str(window.service.skins.path(account) or "")
         self.preview = SkinPreview()
         self.preview.setObjectName("skin-preview")
         self.body.addWidget(self.preview)
-        self.model = combo([("default","宽臂 · Steve"),("slim","细臂 · Alex")],account.get("skin_model","default"),"skin-model")
-        self.body.addWidget(field("模型",self.model))
-        self.body.addWidget(label("本地离线皮肤 · 重新启动游戏生效","muted"))
-        self.body.addLayout(row(Button("选择 PNG",self.choose),Button("恢复默认",self.reset)))
-        player_skin = Button("下载玩家皮肤",self.download_player)
+        self.model = combo([("default",tr("宽臂 · Steve")),("slim",tr("细臂 · Alex"))],account.get("skin_model","default"),"skin-model")
+        self.body.addWidget(field(tr("模型"),self.model))
+        self.body.addWidget(label(tr("本地离线皮肤 · 重新启动游戏生效"),"muted"))
+        self.body.addLayout(row(Button(tr("选择 PNG"),self.choose),Button(tr("恢复默认"),self.reset)))
+        player_skin = Button(tr("下载玩家皮肤"),self.download_player)
         player_skin.setObjectName("offline-download-player-skin")
         self.body.addWidget(player_skin)
-        self.submit = Button("保存",self.save,True)
+        self.submit = Button(tr("保存"),self.save,True)
         self.submit.setObjectName("skin-save")
         self.footer.addWidget(self.submit)
         self.model.currentIndexChanged.connect(self.update_preview)
@@ -248,11 +466,11 @@ class SkinDialog(NativeDialog):
         self.preview.set_skin(self.pending_path,self.model.currentData())
 
     def choose(self):
-        path,_ = QFileDialog.getOpenFileName(self,"选择皮肤","","Minecraft 皮肤 (*.png)")
+        path,_ = QFileDialog.getOpenFileName(self,tr("选择皮肤"),"",tr("Minecraft 皮肤 (*.png)"))
         if not path: return
         reader = QImageReader(path)
         if bytes(reader.format()).lower()!=b"png" or (reader.size().width(),reader.size().height()) not in ((64,64),(64,32)):
-            self.error("请选择 64×64 或 64×32 PNG 皮肤")
+            self.error(tr("请选择 64×64 或 64×32 PNG 皮肤"))
             return
         self.pending_path = path
         self.error("")
@@ -276,18 +494,18 @@ class SkinDialog(NativeDialog):
         def saved(_):
             self.accept()
             self.window.refresh()
-            self.window.toast("皮肤已保存")
+            self.window.toast(tr("皮肤已保存"))
         self.window.request(path,data,saved,failed)
 
 
 class PlayerSkinDialog(NativeDialog):
     def __init__(self,window,account_id=None,player=""):
-        super().__init__(window,"下载玩家皮肤",width=620)
+        super().__init__(window,tr("下载玩家皮肤"),width=620)
         self.setObjectName("player-skin-dialog")
         self.resize(620,min(610,window.height()))
         self.account_id,self.skin_result = account_id,None
-        self.player = text_input(player,"正版玩家名或 UUID","skin-player")
-        self.fetch_button = Button("获取皮肤",self.fetch,True)
+        self.player = text_input(player,tr("正版玩家名或 UUID"),"skin-player")
+        self.fetch_button = Button(tr("获取皮肤"),self.fetch,True)
         self.fetch_button.setObjectName("fetch-player-skin")
         self.body.addLayout(row(self.player,self.fetch_button))
         self.preview = SkinPreview()
@@ -295,13 +513,13 @@ class PlayerSkinDialog(NativeDialog):
         self.body.addWidget(self.preview)
         self.info = label("","muted",True)
         self.body.addWidget(self.info)
-        self.export_button = Button("保存 PNG",self.export)
+        self.export_button = Button(tr("保存 PNG"),self.export)
         self.export_button.setObjectName("export-player-skin")
         self.export_button.setEnabled(False)
         self.footer.addWidget(self.export_button)
         self.apply_button = None
         if account_id:
-            self.apply_button = Button("应用到离线账号",self.apply_skin,True)
+            self.apply_button = Button(tr("应用到离线账号"),self.apply_skin,True)
             self.apply_button.setObjectName("apply-player-skin")
             self.apply_button.setEnabled(False)
             self.footer.addWidget(self.apply_button)
@@ -314,7 +532,7 @@ class PlayerSkinDialog(NativeDialog):
         self.export_button.setEnabled(False)
         if self.apply_button: self.apply_button.setEnabled(False)
         self.error("")
-        self.info.setText("正在获取官方玩家档案和皮肤…")
+        self.info.setText(tr("正在获取官方玩家档案和皮肤…"))
         def failed(message):
             if not self.isVisible(): return
             self.fetch_button.setEnabled(True)
@@ -324,7 +542,7 @@ class PlayerSkinDialog(NativeDialog):
             if not self.isVisible(): return
             self.skin_result = result
             self.preview.set_skin(result["path"],result["model"])
-            self.info.setText(result["name"]+" · "+("细臂" if result["model"]=="slim" else "宽臂"))
+            self.info.setText(result["name"]+" · "+(tr("细臂") if result["model"]=="slim" else tr("宽臂")))
             self.fetch_button.setEnabled(True)
             self.export_button.setEnabled(True)
             if self.apply_button: self.apply_button.setEnabled(True)
@@ -332,10 +550,10 @@ class PlayerSkinDialog(NativeDialog):
 
     def export(self):
         if not self.skin_result: return
-        destination,_ = QFileDialog.getSaveFileName(self,"保存玩家皮肤",self.skin_result["name"]+".png","PNG 皮肤 (*.png)")
+        destination,_ = QFileDialog.getSaveFileName(self,tr("保存玩家皮肤"),self.skin_result["name"]+".png",tr("PNG 皮肤 (*.png)"))
         if destination:
             self.window.request("skins/export",{"path":self.skin_result["path"],"destination":destination},
-                                lambda result:self.window.toast("皮肤已保存至 "+result["path"]),self.error)
+                                lambda result:self.window.toast(tr("皮肤已保存至 ")+result["path"]),self.error)
 
     def apply_skin(self):
         if not self.skin_result or not self.account_id: return
@@ -346,7 +564,7 @@ class PlayerSkinDialog(NativeDialog):
         def saved(_):
             self.accept()
             self.window.refresh()
-            self.window.toast("离线皮肤已应用，重新启动游戏生效")
+            self.window.toast(tr("离线皮肤已应用，重新启动游戏生效"))
         self.window.request("accounts/skin",{"id":self.account_id,"path":self.skin_result["path"],"model":self.skin_result["model"]},saved,failed)
 
 
@@ -357,9 +575,13 @@ class LauncherWindow(LiveSettings, QMainWindow):
         self.images = ImageLoader(self.service.store.root, self)
         self.service.store.save({"theme": "glass"})
         self.data = self.service.state()
+        configured_language = self.data["config"].get("language", "zh_CN")
+        set_language(configured_language if configured_language in dict(LANGUAGES) else "zh_CN")
+        QLocale.setDefault(QLocale(language()))
         self.animations = self.data["config"].get("animations", True)
         QApplication.instance().setProperty("animations", self.animations)
-        self.setWindowTitle("星月启动器")
+        self.setWindowTitle(tr("星月启动器"))
+        QApplication.instance().setApplicationDisplayName(self.windowTitle())
         self.setObjectName("StarMoonNativeWindow")
         self.setWindowFlag(Qt.FramelessWindowHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
@@ -390,12 +612,14 @@ class LauncherWindow(LiveSettings, QMainWindow):
         self.instance_settings_timer = QTimer(self)
         self.instance_settings_timer.setSingleShot(True)
         self.instance_settings_timer.timeout.connect(self.flush_instance_settings)
+        self._update_checking = self._installing_update = False
         self.background_request = ""
         self.setWindowIcon(application_icon())
         self.tray = QSystemTrayIcon(self.windowIcon(), self)
-        self.tray.setToolTip("星月启动器 · 游戏运行中")
+        self.tray.setToolTip(tr("星月启动器 · 游戏运行中"))
         tray_menu = QMenu(self)
-        show_action = QAction("打开启动器", self)
+        show_action = QAction(tr("打开启动器"), self)
+        self.show_launcher_action = show_action
         show_action.triggered.connect(self.restore_window)
         tray_menu.addAction(show_action)
         self.tray.setContextMenu(tray_menu)
@@ -432,9 +656,10 @@ class LauncherWindow(LiveSettings, QMainWindow):
         brand_icon = QLabel()
         brand_icon.setPixmap(self.windowIcon().pixmap(29, 29))
         header.addWidget(brand_icon)
-        header.addWidget(label("星月启动器", "brand"))
+        self.brand_label = label(tr("星月启动器"), "brand")
+        header.addWidget(self.brand_label)
         header.addSpacing(15)
-        self.navigation_switch = NavigationSwitch((("launch","启动"),("download","下载"),("settings","设置"),("more","更多")))
+        self.navigation_switch = NavigationSwitch((("launch",tr("启动")),("download",tr("下载")),("settings",tr("设置")),("more",tr("更多"))))
         self.navigation_switch.selected.connect(lambda key:self.navigate({"launch":"home","download":"install","settings":"settings","more":"accounts"}[key]))
         self.top_buttons = self.navigation_switch.buttons
         header.addWidget(self.navigation_switch)
@@ -443,7 +668,7 @@ class LauncherWindow(LiveSettings, QMainWindow):
         self.download_button.setMinimumWidth(42)
         self.download_button.setFixedWidth(48)
         self.download_button.setObjectName("task-entry")
-        self.download_button.setToolTip("正在运行")
+        self.download_button.setToolTip(tr("正在运行"))
         header.addWidget(self.download_button)
         top.add_controls()
         self.central_layout.addWidget(top)
@@ -485,46 +710,49 @@ class LauncherWindow(LiveSettings, QMainWindow):
             return
         if self.page_id == "instance":
             instance = self.service.store.instance(self.instance_id)
-            self.side_layout.addWidget(Button("← 返回启动", lambda: self.navigate("home")))
+            self.side_layout.addWidget(Button(tr("← 返回启动"), lambda: self.navigate("home")))
             self.side_layout.addWidget(ElidedLabel(instance["name"], "section"))
-            for key, text in (("overview", "概览"), ("settings", "设置"), ("mods", "模组管理"), ("resourcepacks", "资源包"), ("shaders", "光影"), ("saves", "存档管理"), ("logs", "日志")):
+            for key, text in (("overview", tr("概览")), ("settings", tr("设置")), ("mods", tr("模组管理")), ("resourcepacks", tr("资源包")), ("shaders", tr("光影")), ("saves", tr("存档管理")), ("logs", tr("日志"))):
                 button = Button(text, lambda checked=False, value=key: self.set_instance_category(value), self.instance_category == key)
                 button.setObjectName("instance-" + key)
                 self.side_layout.addWidget(button)
             self.side_layout.addStretch()
             return
         if self.page_id == "library":
-            self.side_layout.addWidget(Button("← 返回启动", lambda: self.navigate("home")))
-            self.side_layout.addWidget(label("游戏文件夹", "fieldLabel"))
-            self.library_folders = combo([(item["path"], item["name"] + (" · 待创建" if item["default"] and not item["available"] else " · 不可用" if not item["available"] else "")) for item in self.data["minecraft_folders"]], self.data["minecraft_path"])
+            self.side_layout.addWidget(Button(tr("← 返回启动"), lambda: self.navigate("home")))
+            self.side_layout.addWidget(label(tr("游戏文件夹"), "fieldLabel"))
+            self.library_folders = combo([(item["path"], item["name"] + (tr(" · 待创建") if item["default"] and not item["available"] else tr(" · 不可用") if not item["available"] else "")) for item in self.data["minecraft_folders"]], self.data["minecraft_path"])
             self.library_folders.setObjectName("minecraft-folders")
             self.library_folders.currentIndexChanged.connect(self.select_minecraft_folder)
             self.side_layout.addWidget(self.library_folders)
             self.side_layout.addWidget(ElidedLabel(self.data["minecraft_path"], "muted"))
-            open_folder = Button("打开文件夹", lambda: self.mutate("folder", {"target": "minecraft"}))
+            open_folder = Button(tr("打开文件夹"), lambda: self.mutate("folder", {"target": "minecraft"}))
             open_folder.setEnabled(self.service.store.selected_minecraft().is_dir())
             self.side_layout.addWidget(open_folder)
             if not self.service.store.minecraft_root.is_dir():
-                create = Button("创建 .minecraft 文件夹", self.create_minecraft_folder, True)
+                create = Button(tr("创建 .minecraft 文件夹"), self.create_minecraft_folder, True)
                 create.setObjectName("create-minecraft")
                 self.side_layout.addWidget(create)
-            self.side_layout.addWidget(Button("添加 .minecraft 文件夹", self.import_directory))
+            self.side_layout.addWidget(Button(tr("添加 .minecraft 文件夹"), self.import_directory))
+            scan = Button(tr("扫描 .minecraft 文件夹"), self.scan_minecraft_folders)
+            scan.setObjectName("scan-minecraft-folders")
+            self.side_layout.addWidget(scan)
             self.side_layout.addStretch()
-            self.side_layout.addWidget(Button("下载版本", lambda: self.navigate("install"), True))
+            self.side_layout.addWidget(Button(tr("下载版本"), lambda: self.navigate("install"), True))
             return
         if self.section_for(self.page_id) == "download":
-            self.side_layout.addWidget(Button("自动安装", lambda: self.navigate("install"), self.page_id == "install"))
-            for key, text in (("modpack", "整合包"), ("mod", "模组"), ("resourcepack", "资源包"), ("shader", "光影")):
+            self.side_layout.addWidget(Button(tr("自动安装"), lambda: self.navigate("install"), self.page_id == "install"))
+            for key, text in (("modpack", tr("整合包")), ("mod", tr("模组")), ("resourcepack", tr("资源包")), ("shader", tr("光影"))):
                 self.side_layout.addWidget(Button(text, lambda checked=False, kind=key: self.explore(kind), self.page_id == "discover" and self.search_state["kind"] == key))
             self.side_layout.addStretch()
-            self.side_layout.addWidget(Button("导入整合包", self.import_pack))
+            self.side_layout.addWidget(Button(tr("导入整合包"), self.import_pack))
             return
         if self.page_id == "settings":
-            for key, text in (("game", "游戏"), ("download", "下载"), ("account", "账户"), ("appearance", "外观"), ("ai", "智能排查"), ("advanced", "高级")):
+            for key, text in (("game", tr("游戏")), ("download", tr("下载")), ("account", tr("账户")), ("appearance", tr("外观")), ("ai", tr("智能排查")), ("advanced", tr("高级"))):
                 self.side_layout.addWidget(Button(text, lambda checked=False, value=key: self.set_settings_category(value), self.settings_category == key))
             self.side_layout.addStretch()
             return
-        for key, text in (("accounts", "账号管理"), ("downloads", "正在运行"), ("about", "关于")):
+        for key, text in (("accounts", tr("账号管理")), ("downloads", tr("正在运行")), ("about", tr("关于"))):
             button = Button(text, lambda checked=False, page=key: self.navigate(page), self.page_id == key)
             button.setObjectName("side-" + key)
             self.nav_buttons[key] = button
@@ -533,9 +761,9 @@ class LauncherWindow(LiveSettings, QMainWindow):
 
     def build_launch_panel(self):
         types = QHBoxLayout()
-        self.microsoft_mode = Button("正版", lambda: self.set_login_mode("microsoft"), self.login_mode == "microsoft")
+        self.microsoft_mode = Button(tr("正版"), lambda: self.set_login_mode("microsoft"), self.login_mode == "microsoft")
         self.microsoft_mode.setObjectName("mode-microsoft")
-        self.offline_mode = Button("离线", lambda: self.set_login_mode("offline"), self.login_mode == "offline")
+        self.offline_mode = Button(tr("离线"), lambda: self.set_login_mode("offline"), self.login_mode == "offline")
         self.offline_mode.setObjectName("mode-offline")
         types.addWidget(self.microsoft_mode)
         types.addWidget(self.offline_mode)
@@ -548,26 +776,26 @@ class LauncherWindow(LiveSettings, QMainWindow):
         self.side_layout.addWidget(avatar)
         self.login_accounts = combo([], name="launch-accounts")
         self.side_layout.addWidget(self.login_accounts)
-        self.offline_name = text_input(placeholder="玩家名", name="launch-player-name")
+        self.offline_name = text_input(placeholder=tr("玩家名"), name="launch-player-name")
         self.offline_name.setMaxLength(16)
         self.offline_name.editingFinished.connect(self.remember_offline_name)
         self.offline_name.returnPressed.connect(self.launch_current)
         self.side_layout.addWidget(self.offline_name)
-        self.wam_login_button = Button("登录", self.microsoft_login, True)
+        self.wam_login_button = Button(tr("登录"), self.microsoft_login, True)
         self.wam_login_button.setObjectName("wam-login")
         self.side_layout.addWidget(self.wam_login_button)
-        self.skin_button = Button("离线皮肤",self.edit_current_skin)
+        self.skin_button = Button(tr("离线皮肤"),self.edit_current_skin)
         self.skin_button.setObjectName("offline-skin")
-        self.side_layout.addLayout(row(Button("账号管理", lambda: self.navigate("accounts")),self.skin_button))
+        self.side_layout.addLayout(row(Button(tr("账号管理"), lambda: self.navigate("accounts")),self.skin_button))
         self.side_layout.addStretch(2)
         self.selected_label = label("", "muted", True)
         self.selected_label.setAlignment(Qt.AlignCenter)
         self.side_layout.addWidget(self.selected_label)
-        self.launch_button = Button("启动游戏", self.launch_current, True)
+        self.launch_button = Button(tr("启动游戏"), self.launch_current, True)
         self.launch_button.setMinimumHeight(62)
         self.launch_button.setObjectName("launch-game")
         self.side_layout.addWidget(self.launch_button)
-        self.side_layout.addLayout(row(Button("版本选择", lambda: self.navigate("library")), Button("版本设置", self.selected_settings)))
+        self.side_layout.addLayout(row(Button(tr("版本选择"), lambda: self.navigate("library")), Button(tr("版本设置"), self.selected_settings)))
         self.login_accounts.currentIndexChanged.connect(self.launch_account_selected)
         self.update_launch_panel()
 
@@ -594,7 +822,7 @@ class LauncherWindow(LiveSettings, QMainWindow):
             for account in accounts:
                 self.login_accounts.addItem(account["name"], account["id"])
             if not accounts:
-                self.login_accounts.addItem("未登录" if self.login_mode == "microsoft" else "新玩家", "")
+                self.login_accounts.addItem(tr("未登录") if self.login_mode == "microsoft" else tr("新玩家"), "")
             index = self.login_accounts.findData(selected_id)
             if index >= 0:
                 self.login_accounts.setCurrentIndex(index)
@@ -610,10 +838,10 @@ class LauncherWindow(LiveSettings, QMainWindow):
         self.offline_name.setVisible(self.login_mode == "offline")
         self.skin_button.setVisible(self.login_mode == "offline")
         self.wam_login_button.setVisible(self.login_mode == "microsoft")
-        self.wam_login_button.setText("切换账户" if accounts else "登录")
+        self.wam_login_button.setText(tr("切换账户") if accounts else tr("登录"))
         selected = self.selected_instance()
-        self.selected_label.setText(selected["name"] if selected else "未选择版本")
-        self.launch_button.setText("再次启动" if selected and self.is_running(selected["id"]) else "启动游戏")
+        self.selected_label.setText(selected["name"] if selected else tr("未选择版本"))
+        self.launch_button.setText(tr("再次启动") if selected and self.is_running(selected["id"]) else tr("启动游戏"))
 
     def edit_current_skin(self):
         name = self.offline_name.text().strip()
@@ -627,7 +855,7 @@ class LauncherWindow(LiveSettings, QMainWindow):
         elif chosen:
             self.edit_skin(chosen["id"])
         else:
-            self.toast("请先填写玩家名")
+            self.toast(tr("请先填写玩家名"))
             self.offline_name.setFocus()
 
     def edit_skin(self,account_id):
@@ -655,7 +883,7 @@ class LauncherWindow(LiveSettings, QMainWindow):
             name = self.offline_name.text().strip()
             if not name:
                 self.offline_name.setFocus()
-                self.toast("请输入玩家名")
+                self.toast(tr("请输入玩家名"))
                 return
             def created(_):
                 self.service.config_update({"offline_name": name})
@@ -685,6 +913,23 @@ class LauncherWindow(LiveSettings, QMainWindow):
     def set_settings_category(self, category):
         self.settings_category = category
         self.navigate("settings")
+
+    def apply_ui_language(self):
+        set_language(self.service.store.config().get("language", "zh_CN"))
+        QLocale.setDefault(QLocale(language()))
+        self.setWindowTitle(tr("星月启动器"))
+        QApplication.instance().setApplicationDisplayName(self.windowTitle())
+        self.brand_label.setText(tr("星月启动器"))
+        self.tray.setToolTip(tr("星月启动器 · 游戏运行中"))
+        self.show_launcher_action.setText(tr("打开启动器"))
+        self.download_button.setToolTip(tr("正在运行"))
+        for key, title in (("launch", "启动"), ("download", "下载"), ("settings", "设置"), ("more", "更多")):
+            self.top_buttons[key].setText(tr(title))
+        for control, title in zip(self.titlebar.controls, ("最小化", "最大化 / 还原", "关闭")):
+            control.setToolTip(tr(title))
+            control.setAccessibleName(tr(title))
+        self.data = self.service.state()
+        self.navigate(self.page_id, False)
 
     def select_version(self, instance_id):
         self.service.config_update({"selected_instance": instance_id})
@@ -720,7 +965,7 @@ class LauncherWindow(LiveSettings, QMainWindow):
         def done(result):
             self.refresh()
             if result and isinstance(result, dict) and result.get("task_id"):
-                self.toast("已加入任务列表")
+                self.toast(tr("已加入任务列表"))
                 if show_tasks:
                     self.navigate("downloads")
             if success:
@@ -731,7 +976,7 @@ class LauncherWindow(LiveSettings, QMainWindow):
         if self.toast_label:
             self.toast_label.hide()
             self.toast_label.deleteLater()
-        self.toast_label = label(text, wrap=True)
+        self.toast_label = label(tr(text), wrap=True)
         self.toast_label.setParent(self)
         tones = theme_palette()
         self.toast_label.setStyleSheet("QLabel {background:%s;color:%s;border:1px solid %s;border-radius:10px;padding:15px;}" %
@@ -796,7 +1041,7 @@ class LauncherWindow(LiveSettings, QMainWindow):
 
     def intro(self, layout, title, subtitle="", actions=()):
         header = QHBoxLayout()
-        header.addWidget(label(title, "section"))
+        header.addWidget(label(tr(title), "section"))
         header.addStretch()
         for button in actions:
             header.addWidget(button)
@@ -814,8 +1059,8 @@ class LauncherWindow(LiveSettings, QMainWindow):
             task = next((t for t in active if t["status"] == "running"), active[0])
             speed = sum(t.get("speed", 0) for t in active)
             download = task.get("download")
-            percent = "下载 {:.1f}%".format(download["percent"]) if download and download.get("active") and download.get("percent") is not None else "下载中" if download and download.get("active") else "处理中"
-            self.task_bar.setText("{}   {}   ↓ {}/s".format(task["message"][:55], percent, human_bytes(speed)))
+            percent = tr("下载 {:.1f}%").format(download["percent"]) if download and download.get("active") and download.get("percent") is not None else tr("下载中") if download and download.get("active") else tr("处理中")
+            self.task_bar.setText("{}   {}   ↓ {}/s".format(tr(task["message"])[:55], percent, human_bytes(speed)))
             self.task_bar.show()
         else:
             self.task_bar.hide()
@@ -847,20 +1092,20 @@ class LauncherWindow(LiveSettings, QMainWindow):
                 if task["status"] in ("failed", "completed", "cancelled") and task["id"] not in self.notified:
                     self.notified.add(task["id"])
                     if not isinstance(task.get("result"),dict) or not task["result"].get("diagnostic_report"):
-                        self.toast(task["title"] + ("：" + task["error"] if task["status"] == "failed" else " · " + STATUS[task["status"]]), task["status"] == "failed")
+                        self.toast(task["title"] + ("：" + task["error"] if task["status"] == "failed" else " · " + tr(STATUS[task["status"]])), task["status"] == "failed")
                     if self.page_id == "instance" and hasattr(self, "instance_panel"):
                         self.instance_panel.refresh_content()
             for process in self.data["processes"]:
                 key = (process.get("id",process["instance_id"]), process.get("started"))
                 if not process["running"] and process.get("exit_code") not in (None, 0) and not process.get("stop_requested") and key not in self.notified_processes:
                     self.notified_processes.add(key)
-                    self.toast("游戏异常退出（代码 {}），可在“正在运行”中查看日志。".format(process["exit_code"]), True)
+                    self.toast(tr("游戏异常退出（代码 {}），可在“正在运行”中查看日志。").format(process["exit_code"]), True)
         except Exception as exc:
             self.timer.stop()
-            self.toast("读取本地数据失败：" + str(exc), True)
+            self.toast(tr("读取本地数据失败：") + str(exc), True)
 
     def page_home(self, layout):
-        check = Button("一键排查",self.check_current)
+        check = Button(tr("一键排查"),self.check_current)
         check.setObjectName("preflight-check")
         layout.addLayout(row(None,check))
         layout.addStretch(1)
@@ -885,7 +1130,7 @@ class LauncherWindow(LiveSettings, QMainWindow):
             box = QVBoxLayout(frame)
             box.setContentsMargins(17, 13, 17, 13)
             name = ElidedLabel(instance["name"], "section")
-            detail = label(instance["game_version"] + " · " + LOADERS[instance["loader"]], "muted")
+            detail = label(instance["game_version"] + " · " + tr(LOADERS[instance["loader"]]), "muted")
             text = QVBoxLayout()
             text.addWidget(name)
             text.addWidget(detail)
@@ -896,16 +1141,16 @@ class LauncherWindow(LiveSettings, QMainWindow):
             line.addSpacing(8)
             line.addLayout(text, 1)
             if chosen:
-                line.addWidget(label("当前", "badge"))
+                line.addWidget(label(tr("当前"), "badge"))
             favorite = Button("★" if instance.get("favorite") else "☆", lambda checked=False, value=instance_id: self.favorite_version(value))
             favorite.setMinimumWidth(36)
             favorite.setFixedWidth(38)
-            favorite.setToolTip("收藏 / 取消收藏")
+            favorite.setToolTip(tr("收藏 / 取消收藏"))
             line.addWidget(favorite)
             manage = Button("⚙\ufe0e", lambda checked=False, value=instance_id: self.open_instance(value))
             manage.setMinimumWidth(36)
             manage.setFixedWidth(38)
-            manage.setToolTip("版本设置")
+            manage.setToolTip(tr("版本设置"))
             line.addWidget(manage)
             box.addLayout(line)
             layout.addWidget(frame)
@@ -917,9 +1162,9 @@ class LauncherWindow(LiveSettings, QMainWindow):
         self.filter_library()
 
     def page_library(self, layout):
-        self.intro(layout, "版本选择", actions=[Button("刷新", lambda: self.refresh_versions())])
-        self.library_query = text_input(placeholder="搜索版本", name="library-search")
-        self.library_loader = combo([("", "所有加载器")] + list(LOADERS.items()), self.library_category)
+        self.intro(layout, tr("版本选择"), actions=[Button(tr("刷新"), lambda: self.refresh_versions())])
+        self.library_query = text_input(placeholder=tr("搜索版本"), name="library-search")
+        self.library_loader = combo([("", tr("所有加载器"))] + list(LOADERS.items()), self.library_category)
         layout.addLayout(row(self.library_query, self.library_loader))
         self.library_container = QWidget()
         self.library_layout = QVBoxLayout(self.library_container)
@@ -932,34 +1177,34 @@ class LauncherWindow(LiveSettings, QMainWindow):
     def page_install(self, layout):
         if getattr(self, "install_version", None):
             version = self.install_version
-            self.intro(layout, "安装 " + version, actions=[Button("← 重新选择原版", self.reset_install_version)])
+            self.intro(layout, tr("安装 ") + version, actions=[Button(tr("← 重新选择原版"), self.reset_install_version)])
             self.install_form = InstallForm(self, version, parent=self.page.body)
             layout.addWidget(self.install_form)
             return
-        self.intro(layout, "自动安装")
-        self.install_query = text_input(placeholder="搜索版本", name="download-version-search")
-        self.install_type = combo([("release", "正式版"), ("snapshot", "快照版"), ("all", "全部")])
+        self.intro(layout, tr("自动安装"))
+        self.install_query = text_input(placeholder=tr("搜索版本"), name="download-version-search")
+        self.install_type = combo([("release", tr("正式版")), ("snapshot", tr("快照版")), ("all", tr("全部"))])
         layout.addLayout(row(self.install_query, self.install_type))
         self.install_list = QListWidget()
         self.install_list.setObjectName("download-versions")
         self.install_list.setMinimumHeight(360)
         self.install_list.setVerticalScrollMode(QListWidget.ScrollPerPixel)
         layout.addWidget(self.install_list, 1)
-        self.install_next = Button("继续", self.install_selected, True)
+        self.install_next = Button(tr("继续"), self.install_selected, True)
         self.install_next.setEnabled(False)
         layout.addLayout(row(None, self.install_next))
         self.install_list.itemActivated.connect(lambda _: self.install_selected())
         self.install_list.currentItemChanged.connect(lambda current, previous: self.install_next.setEnabled(current is not None))
         self.install_query.textChanged.connect(self.filter_install_versions)
         self.install_type.currentIndexChanged.connect(self.filter_install_versions)
-        self.install_status = label("加载中…", "muted")
+        self.install_status = label(tr("加载中…"), "muted")
         layout.addWidget(self.install_status)
         def received(data):
             self.manifest_cache = data
             if self.page_id == "install":
                 self.install_status.hide()
                 self.filter_install_versions()
-        self.request("manifest", success=received, error=lambda message: self.install_status.setText(message) if self.page_id == "install" else None)
+        self.request("manifest", success=received, error=lambda message: self.install_status.setText(tr(message)) if self.page_id == "install" else None)
 
     def filter_install_versions(self):
         if self.page_id != "install" or not getattr(self, "manifest_cache", None):
@@ -985,10 +1230,13 @@ class LauncherWindow(LiveSettings, QMainWindow):
             self.navigate("install", False)
 
     def page_about(self, layout):
-        self.intro(layout, "星月启动器 0.7.5")
+        self.intro(layout, tr("星月启动器 {}").format(__version__))
         frame, box = card()
-        box.addWidget(label("作者：星月晓梦", "fieldLabel"))
-        box.addLayout(row(Button("许可证", self.show_licenses), Button("数据目录", lambda: self.mutate("folder", {"target": "data"})), None))
+        box.addWidget(label(tr("作者：星月晓梦"), "fieldLabel"))
+        check = Button(tr("检查启动器更新"), self.open_launcher_updates, True)
+        check.setObjectName("check-launcher-updates")
+        box.addWidget(check)
+        box.addLayout(row(Button(tr("许可证"), self.show_licenses), Button(tr("数据目录"), lambda: self.mutate("folder", {"target": "data"})), None))
         layout.addWidget(frame)
 
     def filter_library(self):
@@ -996,21 +1244,21 @@ class LauncherWindow(LiveSettings, QMainWindow):
         query, loader = self.library_query.text().lower(), self.library_loader.currentData()
         items = [i for i in self.data["instances"] if os.path.normcase(i.get("minecraft_path", str(self.service.store.minecraft_root))) == os.path.normcase(self.data["minecraft_path"]) and query in (i["name"]+" "+i["game_version"]).lower() and (not loader or i["loader"] == loader)]
         if items:
-            groups = [("收藏的版本", [i for i in items if i.get("favorite")]),
-                      ("常规版本", [i for i in items if not i.get("favorite")])]
+            groups = [(tr("收藏的版本"), [i for i in items if i.get("favorite")]),
+                      (tr("常规版本"), [i for i in items if not i.get("favorite")])]
             for title, members in groups:
                 if members:
                     self.library_layout.addWidget(label(title + "  ·  " + str(len(members)), "fieldLabel"))
                     self.instance_grid(self.library_layout, members)
         else:
             missing = not self.service.store.selected_minecraft().is_dir()
-            self.library_layout.addWidget(empty("尚未创建游戏文件夹" if missing else "没有匹配的版本", "点击左侧创建，或添加已有 .minecraft 文件夹" if missing else "", None if missing else Button("下载版本", self.new_instance, True)))
+            self.library_layout.addWidget(empty(tr("尚未创建游戏文件夹") if missing else tr("没有匹配的版本"), tr("点击左侧创建，或添加已有 .minecraft 文件夹") if missing else "", None if missing else Button(tr("下载版本"), self.new_instance, True)))
 
     def create_minecraft_folder(self):
         def created(_):
             self.data = self.service.state()
             self.navigate("library", False)
-            self.toast("已创建 .minecraft 文件夹")
+            self.toast(tr("已创建 .minecraft 文件夹"))
         self.request("folders/create", {}, created)
 
     def refresh_versions(self):
@@ -1025,26 +1273,26 @@ class LauncherWindow(LiveSettings, QMainWindow):
         self.request("folders/select", {"path": selected}, selected_folder)
 
     def page_accounts(self, layout):
-        download = Button("下载玩家皮肤",lambda:self.open_player_skin())
+        download = Button(tr("下载玩家皮肤"),lambda:self.open_player_skin())
         download.setObjectName("download-player-skin")
-        self.intro(layout, "账号管理", actions=[Button("添加离线账号", self.add_offline), Button("正版登录", self.microsoft_login, True)])
+        self.intro(layout, tr("账号管理"), actions=[Button(tr("添加离线账号"), self.add_offline), Button(tr("正版登录"), self.microsoft_login, True)])
         layout.addLayout(row(None,download))
         accounts = self.data["config"]["accounts"]
         if not accounts:
-            layout.addWidget(empty("暂无账号", "", Button("添加离线账号", self.add_offline, True)))
+            layout.addWidget(empty(tr("暂无账号"), "", Button(tr("添加离线账号"), self.add_offline, True)))
         for account in accounts:
             frame, box = card()
-            box.addLayout(row(label(account["name"], "section"), None, label("离线账号" if account["type"] == "offline" else "Microsoft", "badge")))
+            box.addLayout(row(label(account["name"], "section"), None, label(tr("离线账号") if account["type"] == "offline" else "Microsoft", "badge")))
             selected = self.account() and account["id"] == self.account()["id"]
             account_id = account["id"]
-            controls = [label("✓ 当前使用" if selected else "", "muted"), None]
+            controls = [label(tr("✓ 当前使用") if selected else "", "muted"), None]
             if account["type"] == "offline":
-                controls.append(Button("离线皮肤",lambda checked=False,value=account_id:self.edit_skin(value)))
+                controls.append(Button(tr("离线皮肤"),lambda checked=False,value=account_id:self.edit_skin(value)))
             else:
-                controls.append(Button("下载皮肤",lambda checked=False,name=account["name"]:self.open_player_skin(player=name)))
+                controls.append(Button(tr("下载皮肤"),lambda checked=False,name=account["name"]:self.open_player_skin(player=name)))
             box.addLayout(row(*controls,
-                              Button("切换账号", lambda checked=False, value=account_id: self.select_account(value)),
-                              Button("移除", lambda checked=False, value=account_id: self.delete_account(value), danger=True)))
+                              Button(tr("切换账号"), lambda checked=False, value=account_id: self.select_account(value)),
+                              Button(tr("移除"), lambda checked=False, value=account_id: self.delete_account(value), danger=True)))
             layout.addWidget(frame)
 
     def select_account(self, account_id):
@@ -1058,10 +1306,10 @@ class LauncherWindow(LiveSettings, QMainWindow):
         self.navigate("home")
 
     def page_downloads(self, layout):
-        self.clear_finished_button = Button("全部关闭", lambda: self.mutate("tasks/dismiss", {}))
+        self.clear_finished_button = Button(tr("全部关闭"), lambda: self.mutate("tasks/dismiss", {}))
         self.clear_finished_button.setObjectName("clear-finished")
-        self.clear_finished_button.setToolTip("关闭所有已结束的项目")
-        self.intro(layout, "正在运行", actions=[self.clear_finished_button])
+        self.clear_finished_button.setToolTip(tr("关闭所有已结束的项目"))
+        self.intro(layout, tr("正在运行"), actions=[self.clear_finished_button])
         self.task_rows = {}
         self.process_rows = {}
         self.tasks_layout = QVBoxLayout()
@@ -1078,7 +1326,7 @@ class LauncherWindow(LiveSettings, QMainWindow):
             self.task_rows = {}
             self.process_rows = {}
             if not tasks and not processes:
-                self.tasks_layout.addWidget(empty("暂无任务", ""))
+                self.tasks_layout.addWidget(empty(tr("暂无任务"), ""))
             for process in processes:
                 frame, box = card()
                 instance_id = process["instance_id"]
@@ -1087,9 +1335,9 @@ class LauncherWindow(LiveSettings, QMainWindow):
                 instance = next((i for i in self.data["instances"] if i["id"] == instance_id), {})
                 state = label("", "badge")
                 box.addLayout(row(ElidedLabel(instance.get("name", "Minecraft"), "section"), None, state))
-                action = Button("结束游戏", lambda checked=False, value=instance_id,run=process_id: self.stop_game(value,run))
-                close = Button("关闭", lambda checked=False, value=key: self.mutate("processes/dismiss", {"id": value}))
-                logs = Button("查看日志", lambda checked=False, value=instance_id,run=process_id: self.show_game_log(value,run))
+                action = Button(tr("结束游戏"), lambda checked=False, value=instance_id,run=process_id: self.stop_game(value,run))
+                close = Button(tr("关闭"), lambda checked=False, value=key: self.mutate("processes/dismiss", {"id": value}))
+                logs = Button(tr("查看日志"), lambda checked=False, value=instance_id,run=process_id: self.show_game_log(value,run))
                 action.setObjectName("stop-process-"+key)
                 logs.setObjectName("log-process-"+key)
                 box.addLayout(row(label("PID  " + str(process["pid"]), "muted"), None, logs, action, close))
@@ -1097,9 +1345,9 @@ class LauncherWindow(LiveSettings, QMainWindow):
                 self.process_rows[key] = (state, action, close)
             for task in tasks:
                 frame, box = card()
-                title, status = ElidedLabel(task["title"], "section"), label("", "badge")
-                cancel = Button("取消", lambda checked=False, task_id=task["id"]: self.mutate("tasks/cancel", {"id": task_id}))
-                close = Button("关闭", lambda checked=False, task_id=task["id"]: self.mutate("tasks/dismiss", {"id": task_id}))
+                title, status = ElidedLabel(tr(task["title"]), "section"), label("", "badge")
+                cancel = Button(tr("取消"), lambda checked=False, task_id=task["id"]: self.mutate("tasks/cancel", {"id": task_id}))
+                close = Button(tr("关闭"), lambda checked=False, task_id=task["id"]: self.mutate("tasks/dismiss", {"id": task_id}))
                 close.setObjectName("close-task-" + task["id"])
                 box.addLayout(row(title, None, status, cancel, close))
                 message = label("", "muted", True)
@@ -1114,25 +1362,25 @@ class LauncherWindow(LiveSettings, QMainWindow):
         for process in processes:
             state, action, close = self.process_rows[process.get("id",process["instance_id"])]
             abnormal = process.get("exit_code") not in (None, 0) and not process.get("stop_requested")
-            state.setText("游戏运行中" if process["running"] else "异常退出 · {}".format(process["exit_code"]) if abnormal else "游戏已结束")
+            state.setText(tr("游戏运行中") if process["running"] else tr("异常退出 · {}").format(process["exit_code"]) if abnormal else tr("游戏已结束"))
             action.setVisible(process["running"])
             close.setVisible(not process["running"])
             close.setEnabled(process.get("finalized", True))
         for task in tasks:
             message, status, progress, info, cancel, close = self.task_rows[task["id"]]
             progress.setActivity(task["status"] == "running")
-            message.setText(task["message"])
-            status.setText(STATUS[task["status"]])
+            message.setText(tr(task["message"]))
+            status.setText(tr(STATUS[task["status"]]))
             download = task.get("download")
             active_download = download and download.get("active") and task["status"] == "running"
             if active_download and download.get("percent") is not None:
-                status.setText("下载 · {:.1f}%".format(download["percent"]))
+                status.setText(tr("下载 · {:.1f}%").format(download["percent"]))
             if active_download and download.get("percent") is None:
                 progress.setRange(0, 0)
             elif active_download:
                 progress.setRange(0, 1000)
                 progress.setValue(round(download["percent"]*10))
-                progress.setFormat("当前下载 %p%")
+                progress.setFormat(tr("当前下载 %p%"))
             elif task["status"] == "running":
                 progress.setRange(0, 0)
             else:
@@ -1142,30 +1390,30 @@ class LauncherWindow(LiveSettings, QMainWindow):
             path = task.get("result") or {}
             speed = "  ·  ↓ {}/s".format(human_bytes(task.get("speed", 0))) if task["status"] == "running" else ""
             if download:
-                amount = human_bytes(download["bytes"]) + (" / " + human_bytes(download["total"]) if download["total"] is not None else " / 大小未知")
-                detail = "{}  ·  文件 {} / {}".format(amount, download["files"], download["files_total"])
+                amount = human_bytes(download["bytes"]) + (" / " + human_bytes(download["total"]) if download["total"] is not None else tr(" / 大小未知"))
+                detail = tr("{}  ·  文件 {} / {}").format(amount, download["files"], download["files_total"])
             else:
                 detail = human_bytes(task["bytes"])
-            info.setText(detail + speed + ("\n保存至 " + path["path"] if isinstance(path, dict) and path.get("path") else ""))
+            info.setText(detail + speed + (tr("\n保存至 ") + path["path"] if isinstance(path, dict) and path.get("path") else ""))
             cancel.setVisible(task["status"] in ("running", "queued"))
             close.setVisible(task["status"] not in ("running", "queued"))
 
     def page_discover(self, layout):
         state = self.search_state
-        self.intro(layout, KINDS[state["kind"]])
+        self.intro(layout, tr(KINDS[state["kind"]]))
         self.content_kind = combo(list(KINDS.items()), state["kind"], "content-kind")
         self.content_kind.setParent(self.page)
         self.content_kind.hide()
         self.content_provider = combo([("modrinth", "Modrinth"), ("curseforge", "CurseForge")], state["provider"])
         self.content_provider.setFixedWidth(145)
-        self.content_instance = combo([("", "不限版本 / 加载器")] + [(i["id"], i["name"] + " · " + i["game_version"]) for i in self.data["instances"]], state["instance"])
+        self.content_instance = combo([("", tr("不限版本 / 加载器"))] + [(i["id"], i["name"] + " · " + i["game_version"]) for i in self.data["instances"]], state["instance"])
         self.content_instance.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         self.content_instance.setMinimumContentsLength(12)
         self.content_instance.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
-        self.content_query = text_input(state["query"], "搜索" + KINDS[state["kind"]], "content-search")
+        self.content_query = text_input(state["query"], tr("搜索{kind}").format(kind=tr(KINDS[state["kind"]])), "content-search")
         self.content_query.setMinimumWidth(0)
         self.content_query.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        layout.addLayout(row(self.content_query, self.content_provider, Button("搜索", self.search_content, True)))
+        layout.addLayout(row(self.content_query, self.content_provider, Button(tr("搜索"), self.search_content, True)))
         if state["kind"] != "modpack":
             layout.addWidget(self.content_instance)
         else:
@@ -1200,12 +1448,12 @@ class LauncherWindow(LiveSettings, QMainWindow):
         if instance and state["kind"] != "modpack":
             params.update(version=instance["game_version"], loader=instance["loader"])
         clear_layout(self.content_result_layout)
-        self.content_result_layout.addWidget(label("正在连接内容平台…", "muted"))
+        self.content_result_layout.addWidget(label(tr("正在连接内容平台…"), "muted"))
         def received(data):
             if self.page_id != "discover" or generation != self.project_search_generation:
                 return
             clear_layout(self.content_result_layout)
-            self.content_result_layout.addWidget(label(short_count(data["total_hits"]) + " 个结果 · 按下载量排序", "muted"))
+            self.content_result_layout.addWidget(label(short_count(data["total_hits"]) + tr(" 个结果 · 按下载量排序"), "muted"))
             for index, project in enumerate(data["hits"]):
                 frame, box = card()
                 frame.setObjectName("project-card")
@@ -1223,23 +1471,23 @@ class LauncherWindow(LiveSettings, QMainWindow):
                 actions = QVBoxLayout()
                 actions.addWidget(label("↓ " + short_count(project["downloads"]), "muted"), 0, Qt.AlignRight)
                 actions.addStretch()
-                button = Button("选择版本", lambda checked=False, item=project: self.project_versions(item), True)
-                button.setFixedWidth(104)
+                button = Button(tr("选择版本"), lambda checked=False, item=project: self.project_versions(item), True)
+                button.setFixedWidth(138 if language() == "en_US" else 104)
                 actions.addWidget(button)
                 line.addLayout(actions)
                 box.addLayout(line)
                 self.content_result_layout.addWidget(frame)
             if not data["hits"]:
-                self.content_result_layout.addWidget(empty("没有找到相关内容", "试试英文关键词，或取消目标实例筛选。"))
-            previous = Button("上一页", lambda: self.content_page(-1))
-            following = Button("下一页", lambda: self.content_page(1))
+                self.content_result_layout.addWidget(empty(tr("没有找到相关内容"), tr("试试英文关键词，或取消目标实例筛选。")))
+            previous = Button(tr("上一页"), lambda: self.content_page(-1))
+            following = Button(tr("下一页"), lambda: self.content_page(1))
             previous.setEnabled(state["offset"] > 0)
             following.setEnabled(state["offset"] + 18 < data["total_hits"])
-            self.content_result_layout.addLayout(row(None, previous, label("第 {} 页".format(state["offset"]//18+1), "muted"), following, None))
+            self.content_result_layout.addLayout(row(None, previous, label(tr("第 {} 页").format(state["offset"]//18+1), "muted"), following, None))
         def failed(message):
             if self.page_id == "discover" and generation == self.project_search_generation:
                 clear_layout(self.content_result_layout)
-                self.content_result_layout.addWidget(empty("暂时无法连接内容平台", message, Button("重试", self.search_content)))
+                self.content_result_layout.addWidget(empty(tr("暂时无法连接内容平台"), message, Button(tr("重试"), self.search_content)))
         self.request("content/search?" + urllib.parse.urlencode(params), success=received, error=failed)
 
     def content_page(self, direction):
@@ -1250,7 +1498,7 @@ class LauncherWindow(LiveSettings, QMainWindow):
     def page_settings(self, layout):
         config = self.settings_draft
         category = self.settings_category
-        self.intro(layout, {"game": "游戏", "download": "下载", "account": "账户", "appearance": "外观", "ai":"智能排查", "advanced": "高级"}[category])
+        self.intro(layout, {"game": tr("游戏"), "download": tr("下载"), "account": tr("账户"), "appearance": tr("外观"), "ai":tr("智能排查"), "advanced": tr("高级")}[category])
         self.settings_fields = {}
         section, box = card()
         if category != "game":
@@ -1258,7 +1506,7 @@ class LauncherWindow(LiveSettings, QMainWindow):
             section.hide()
         else:
             layout.addWidget(section)
-        self.memory_auto_check = QCheckBox("自动分配")
+        self.memory_auto_check = QCheckBox(tr("自动分配"))
         self.memory_auto_check.setObjectName("memory-auto")
         self.memory_auto_check.setChecked(config.get("memory_auto", True))
         box.addWidget(self.memory_auto_check)
@@ -1269,24 +1517,24 @@ class LauncherWindow(LiveSettings, QMainWindow):
         self.memory_slider.setObjectName("memory-slider")
         self.memory_label = label("{:.1f} GB".format(config["memory"]/1024), "section")
         self.memory_slider.valueChanged.connect(self.update_memory_preview)
-        box.addLayout(row(label("游戏内存", "fieldLabel"), None, self.memory_label))
+        box.addLayout(row(label(tr("游戏内存"), "fieldLabel"), None, self.memory_label))
         box.addWidget(self.memory_slider)
         self.memory_status = label("", "muted")
         box.addWidget(self.memory_status)
         self.memory_auto_check.toggled.connect(self.update_memory_preview)
         self.update_memory_preview()
-        self.settings_fields["java_path"] = text_input(config["java_path"], "留空自动匹配，或指定 java.exe", "java-path")
+        self.settings_fields["java_path"] = text_input(config["java_path"], tr("留空自动匹配，或指定 java.exe"), "java-path")
         java_container = QWidget()
         java_layout = QVBoxLayout(java_container)
         java_layout.setContentsMargins(0, 0, 0, 0)
-        java_layout.addLayout(row(self.settings_fields["java_path"], Button("浏览", self.choose_java), Button("检测", self.detect_java)))
+        java_layout.addLayout(row(self.settings_fields["java_path"], Button(tr("浏览"), self.choose_java), Button(tr("检测"), self.detect_java)))
         self.java_detected_layout = java_layout
-        box.addWidget(field("Java 可执行文件", java_container))
-        self.java_auto = QCheckBox("自动匹配与下载 Java（Eclipse Temurin）")
+        box.addWidget(field(tr("Java 可执行文件"), java_container))
+        self.java_auto = QCheckBox(tr("自动匹配与下载 Java（Eclipse Temurin）"))
         self.java_auto.setChecked(config["java_auto"])
         box.addWidget(self.java_auto)
         dimensions = QHBoxLayout()
-        for key, title, low, high in (("width", "游戏窗口宽度", 640, 7680), ("height", "游戏窗口高度", 480, 4320)):
+        for key, title, low, high in (("width", tr("游戏窗口宽度"), 640, 7680), ("height", tr("游戏窗口高度"), 480, 4320)):
             widget = QSpinBox()
             widget.setRange(low, high)
             widget.setValue(config[key])
@@ -1300,14 +1548,14 @@ class LauncherWindow(LiveSettings, QMainWindow):
             section.hide()
         else:
             layout.addWidget(section)
-        self.settings_fields["source"] = combo([("bmclapi", "BMCLAPI 镜像"), ("official", "Mojang 官方源")], config["source"])
-        box.addWidget(field("游戏下载源", self.settings_fields["source"]))
+        self.settings_fields["source"] = combo([("bmclapi", tr("BMCLAPI 镜像")), ("official", tr("Mojang 官方源"))], config["source"])
+        box.addWidget(field(tr("游戏下载源"), self.settings_fields["source"]))
         concurrency = QSpinBox()
         concurrency.setRange(1, 16)
         concurrency.setValue(config["concurrency"])
         self.settings_fields["concurrency"] = concurrency
-        box.addWidget(field("总下载连接数", concurrency))
-        self.download_parallel = QCheckBox("多线程分段下载")
+        box.addWidget(field(tr("总下载连接数"), concurrency))
+        self.download_parallel = QCheckBox(tr("多线程分段下载"))
         self.download_parallel.setChecked(config.get("download_parallel",True))
         box.addWidget(self.download_parallel)
         segments = QSpinBox()
@@ -1316,8 +1564,8 @@ class LauncherWindow(LiveSettings, QMainWindow):
         segments.setEnabled(self.download_parallel.isChecked())
         self.download_parallel.toggled.connect(segments.setEnabled)
         self.settings_fields["download_segments"] = segments
-        box.addWidget(field("每个大文件分段数",segments))
-        key = text_input(placeholder="已保存；留空保留" if config["curseforge_configured"] else "输入 CurseForge API Key")
+        box.addWidget(field(tr("每个大文件分段数"),segments))
+        key = text_input(placeholder=tr("已保存；留空保留") if config["curseforge_configured"] else tr("输入 CurseForge API Key"))
         key.setEchoMode(QLineEdit.Password)
         key.setText(config.get("curseforge_key", ""))
         self.settings_fields["curseforge_key"] = key
@@ -1329,25 +1577,27 @@ class LauncherWindow(LiveSettings, QMainWindow):
         else:
             layout.addWidget(section)
         box.addWidget(label("Windows Web Account Manager", "fieldLabel"))
-        box.addWidget(Button("账号管理", lambda: self.navigate("accounts")))
+        box.addWidget(Button(tr("账号管理"), lambda: self.navigate("accounts")))
         section, box = card()
         if category != "appearance":
             section.setParent(self.page)
             section.hide()
         else:
             layout.addWidget(section)
-        box.addWidget(label("界面配色", "section"))
+        self.settings_fields["language"] = combo(LANGUAGES, config.get("language", "zh_CN"), "language")
+        box.addWidget(field(tr("语言 / Language"), self.settings_fields["language"]))
+        box.addWidget(label(tr("界面配色"), "section"))
         self.settings_fields["color_scheme"] = combo([(key,item["name"]) for key,item in SCHEMES.items()],config.get("color_scheme","starmoon"),"color-scheme")
         box.addWidget(self.settings_fields["color_scheme"])
         colors_preview = PalettePreview(config.get("color_scheme","starmoon"))
         box.addWidget(colors_preview)
         self.settings_fields["color_scheme"].currentIndexChanged.connect(lambda: colors_preview.set_scheme(self.settings_fields["color_scheme"].currentData()))
-        box.addWidget(label("启动器窗口", "section"))
+        box.addWidget(label(tr("启动器窗口"), "section"))
         current_size = "{}x{}".format(config.get("launcher_width", 900), config.get("launcher_height", 600))
-        presets = combo([("custom", "自定义尺寸"), ("900x600", "紧凑 · 900 × 600"), ("1100x720", "标准 · 1100 × 720"), ("1280x800", "宽敞 · 1280 × 800"), ("1440x900", "大窗口 · 1440 × 900")], current_size if current_size in ("900x600", "1100x720", "1280x800", "1440x900") else "custom", "launcher-size-preset")
+        presets = combo([("custom", tr("自定义尺寸")), ("900x600", tr("紧凑 · 900 × 600")), ("1100x720", tr("标准 · 1100 × 720")), ("1280x800", tr("宽敞 · 1280 × 800")), ("1440x900", tr("大窗口 · 1440 × 900"))], current_size if current_size in ("900x600", "1100x720", "1280x800", "1440x900") else "custom", "launcher-size-preset")
         box.addWidget(presets)
         dimensions = QHBoxLayout()
-        for key, title, low, high in (("launcher_width", "宽度", 900, 7680), ("launcher_height", "高度", 600, 4320)):
+        for key, title, low, high in (("launcher_width", tr("宽度"), 900, 7680), ("launcher_height", tr("高度"), 600, 4320)):
             widget = QSpinBox()
             widget.setRange(low, high)
             widget.setValue(config.get(key, 900 if key.endswith("width") else 600))
@@ -1369,71 +1619,79 @@ class LauncherWindow(LiveSettings, QMainWindow):
             presets.blockSignals(False)
         self.settings_fields["launcher_width"].valueChanged.connect(size_edited)
         self.settings_fields["launcher_height"].valueChanged.connect(size_edited)
-        box.addWidget(label("实时应用；超出屏幕时自动适配。", "muted"))
-        self.animations_check = QCheckBox("界面动效")
+        box.addWidget(label(tr("实时应用；超出屏幕时自动适配。"), "muted"))
+        self.animations_check = QCheckBox(tr("界面动效"))
         self.animations_check.setChecked(config.get("animations", True))
         box.addWidget(self.animations_check)
-        box.addWidget(label("壁纸", "section"))
+        box.addWidget(label(tr("壁纸"), "section"))
         self.background_file_label = label(wallpaper_label(config), "muted")
-        preset_button = Button("更改预设",self.choose_preset_background)
+        preset_button = Button(tr("更改预设"),self.choose_preset_background)
         preset_button.setObjectName("choose-preset-wallpaper")
         box.addLayout(row(self.background_file_label,None,preset_button))
-        choose = Button("选择壁纸",self.choose_background)
+        choose = Button(tr("选择壁纸"),self.choose_background)
         choose.setObjectName("choose-wallpaper")
-        restore = Button("恢复默认",self.reset_background)
+        restore = Button(tr("恢复默认"),self.reset_background)
         restore.setObjectName("reset-wallpaper")
-        clear = Button("清除壁纸",self.clear_background)
+        clear = Button(tr("清除壁纸"),self.clear_background)
         clear.setObjectName("clear-wallpaper")
         box.addLayout(row(choose,restore,clear))
         self.background_opacity = GlassSlider(Qt.Horizontal)
         self.background_opacity.setRange(0, 100)
         self.background_opacity.setValue(config.get("background_opacity", 55))
-        box.addWidget(field("主窗口壁纸强度", self.background_opacity))
+        box.addWidget(field(tr("主窗口壁纸强度"), self.background_opacity))
         self.glass_opacity = GlassSlider(Qt.Horizontal)
         self.glass_opacity.setRange(0, 120)
         self.glass_opacity.setValue(config.get("glass_opacity", 72))
-        box.addWidget(field("玻璃不透明度", self.glass_opacity))
+        box.addWidget(field(tr("玻璃不透明度"), self.glass_opacity))
         self.glass_refraction = GlassSlider(Qt.Horizontal)
         self.glass_refraction.setRange(0, 200)
         self.glass_refraction.setValue(config.get("glass_refraction", 65))
-        box.addWidget(field("玻璃折射", self.glass_refraction))
+        box.addWidget(field(tr("玻璃折射"), self.glass_refraction))
         section, box = card()
         if category != "ai":
             section.setParent(self.page)
             section.hide()
         else:
             layout.addWidget(section)
-        self.settings_fields["ai_base_url"] = text_input(config.get("ai_base_url",""),"https://你的服务地址/v1","ai-base-url")
-        self.settings_fields["ai_model"] = text_input(config.get("ai_model",""),"服务商提供的模型名称","ai-model")
-        self.settings_fields["ai_api_key"] = text_input(config.get("ai_api_key",""),"已保存；留空保留" if config.get("ai_key_configured") else "API Key","ai-api-key")
+        self.settings_fields["ai_base_url"] = text_input(config.get("ai_base_url",""),tr("https://你的服务地址/v1"),"ai-base-url")
+        self.settings_fields["ai_model"] = text_input(config.get("ai_model",""),tr("服务商提供的模型名称"),"ai-model")
+        self.settings_fields["ai_api_key"] = text_input(config.get("ai_api_key",""),tr("已保存；留空保留") if config.get("ai_key_configured") else "API Key","ai-api-key")
         self.settings_fields["ai_api_key"].setEchoMode(QLineEdit.Password)
-        for key,title in (("ai_base_url","接口地址（兼容 Chat Completions）"),("ai_model","模型"),("ai_api_key","API Key")):
+        for key,title in (("ai_base_url",tr("接口地址（兼容 Chat Completions）")),("ai_model",tr("模型")),("ai_api_key","API Key")):
             box.addWidget(field(title,self.settings_fields[key]))
-        self.ai_clear_key = QCheckBox("清除已保存的 API Key")
+        self.ai_clear_key = QCheckBox(tr("清除已保存的 API Key"))
         self.ai_clear_key.setChecked(config.get("ai_clear_key",False))
         box.addWidget(self.ai_clear_key)
-        self.ai_crash_check = QCheckBox("崩溃后自动分析")
+        self.ai_crash_check = QCheckBox(tr("崩溃后自动分析"))
         self.ai_crash_check.setObjectName("ai-crash-analysis")
         self.ai_crash_check.setChecked(config.get("ai_crash_analysis",True))
         box.addWidget(self.ai_crash_check)
-        self.ai_preflight_check = QCheckBox("启动前自动排查")
+        self.ai_preflight_check = QCheckBox(tr("启动前自动排查"))
         self.ai_preflight_check.setObjectName("ai-auto-preflight")
         self.ai_preflight_check.setChecked(config.get("ai_auto_preflight",False))
         box.addWidget(self.ai_preflight_check)
-        box.addWidget(label("发送启用模组的元数据与相关错误日志，过滤令牌、账号和常见个人路径。静态排查无法保证发现所有运行期冲突。","muted",True))
-        box.addLayout(row(Button("测试连接",self.test_ai_connection),Button("查看上次结果",self.show_latest_diagnostic),None))
+        box.addWidget(label(tr("发送启用模组的元数据与相关错误日志，过滤令牌、账号和常见个人路径。静态排查无法保证发现所有运行期冲突。"),"muted",True))
+        box.addLayout(row(Button(tr("测试连接"),self.test_ai_connection),Button(tr("查看上次结果"),self.show_latest_diagnostic),None))
         section, box = card()
         if category != "advanced":
             section.setParent(self.page)
             section.hide()
         else:
             layout.addWidget(section)
-        for key, title in (("jvm_args", "额外 JVM 参数"), ("game_args", "额外游戏参数")):
+        box.addWidget(label(tr("启动器更新"), "section"))
+        automatic = QCheckBox(tr("启动时自动检查更新"))
+        automatic.setObjectName("auto-check-launcher-updates")
+        automatic.setChecked(config.get("auto_check_updates", True))
+        self.settings_fields["auto_check_updates"] = automatic
+        box.addWidget(automatic)
+        box.addWidget(label(tr("从 GitHub Releases 获取正式版本，安装前需要关闭游戏和其他任务。"), "muted", True))
+        box.addWidget(Button(tr("检查启动器更新"), self.open_launcher_updates))
+        for key, title in (("jvm_args", tr("额外 JVM 参数")), ("game_args", tr("额外游戏参数"))):
             widget = QPlainTextEdit(config[key])
             widget.setFixedHeight(90)
             self.settings_fields[key] = widget
             box.addWidget(field(title, widget))
-        box.addWidget(Button("数据目录", lambda: self.mutate("folder", {"target": "data"})))
+        box.addWidget(Button(tr("数据目录"), lambda: self.mutate("folder", {"target": "data"})))
         self.connect_live_settings()
 
     def collect_settings(self):
@@ -1441,7 +1699,8 @@ class LauncherWindow(LiveSettings, QMainWindow):
                 "download_parallel":self.download_parallel.isChecked(),"ai_crash_analysis":self.ai_crash_check.isChecked(),"ai_auto_preflight":self.ai_preflight_check.isChecked(),"ai_clear_key":self.ai_clear_key.isChecked(),
                 "background_opacity": self.background_opacity.value(), "glass_opacity": self.glass_opacity.value(), "glass_refraction": self.glass_refraction.value(), "background_path": self.settings_draft.get("background_path", "")}
         for key, widget in self.settings_fields.items():
-            data[key] = widget.currentData() if isinstance(widget, QComboBox) else widget.value() if isinstance(widget, QSpinBox) else widget.toPlainText() if isinstance(widget, QPlainTextEdit) else widget.text().strip()
+            data[key] = (widget.currentData() if isinstance(widget, QComboBox) else widget.value() if isinstance(widget, QSpinBox)
+                         else widget.isChecked() if isinstance(widget, QCheckBox) else widget.toPlainText() if isinstance(widget, QPlainTextEdit) else widget.text().strip())
         if not data["curseforge_key"]:
             del data["curseforge_key"]
             self.settings_draft.pop("curseforge_key", None)
@@ -1464,8 +1723,8 @@ class LauncherWindow(LiveSettings, QMainWindow):
         except LauncherError:
             count = 0
         value = automatic_memory(info["total"], info["available"], count) if auto else self.memory_slider.value()
-        self.memory_label.setText(("自动 · " if auto else "") + "{:.1f} GB".format(value/1024))
-        self.memory_status.setText("可用 {:.1f} GB / 总计 {:.1f} GB".format(info["available"]/1024, info["total"]/1024))
+        self.memory_label.setText((tr("自动 · ") if auto else "") + "{:.1f} GB".format(value/1024))
+        self.memory_status.setText(tr("可用 {:.1f} GB / 总计 {:.1f} GB").format(info["available"]/1024, info["total"]/1024))
 
     def apply_appearance(self):
         config = self.data["config"]
@@ -1486,7 +1745,7 @@ class LauncherWindow(LiveSettings, QMainWindow):
                 illustration.setVisible(self.glass_surface.image.isNull())
 
     def choose_background(self):
-        path, _ = QFileDialog.getOpenFileName(self, "选择背景", "", "背景图片 (*.png *.jpg *.jpeg *.webp *.bmp)")
+        path, _ = QFileDialog.getOpenFileName(self, tr("选择背景"), "", tr("背景图片 (*.png *.jpg *.jpeg *.webp *.bmp)"))
         if not path:
             return
         request_id = uuid.uuid4().hex
@@ -1496,13 +1755,13 @@ class LauncherWindow(LiveSettings, QMainWindow):
             reader.setAutoTransform(True)
             size = reader.size()
             if not size.isValid() or size.width()*size.height() > 100000000:
-                raise LauncherError("无法读取背景图片，或图片尺寸过大")
+                raise LauncherError(tr("无法读取背景图片，或图片尺寸过大"))
             reader.setScaledSize(size.scaled(2560, 1600, Qt.KeepAspectRatio))
             image = reader.read()
             destination = self.service.store.root / "appearance" / ("background-" + uuid.uuid4().hex + ".png")
             destination.parent.mkdir(parents=True, exist_ok=True)
             if image.isNull() or not image.save(str(destination), "PNG"):
-                raise LauncherError("保存背景失败")
+                raise LauncherError(tr("保存背景失败"))
             return str(destination)
         def chosen(destination):
             if self.background_request == request_id:
@@ -1510,7 +1769,7 @@ class LauncherWindow(LiveSettings, QMainWindow):
         self.async_call(prepare, chosen)
 
     def choose_preset_background(self):
-        dialog = NativeDialog(self,"预设壁纸",width=620)
+        dialog = NativeDialog(self,tr("预设壁纸"),width=620)
         dialog.setObjectName("preset-wallpaper-dialog")
         dialog.resize(620,min(600,self.height()))
         grid = QGridLayout()
@@ -1522,7 +1781,7 @@ class LauncherWindow(LiveSettings, QMainWindow):
             if self.set_wallpaper("default" if preset == "default" else "preset",preset=preset):
                 dialog.accept()
         for index,(preset,name,_) in enumerate(BACKGROUND_PRESETS):
-            tile = WallpaperTile(name,preset_background(preset),current == preset,lambda checked=False,key=preset:select(key))
+            tile = WallpaperTile(tr(name),preset_background(preset),current == preset,lambda checked=False,key=preset:select(key))
             tile.setObjectName("wallpaper-preset-"+preset)
             grid.addWidget(tile,index//2,index%2)
         grid.setColumnStretch(0,1)
@@ -1549,11 +1808,11 @@ class LauncherWindow(LiveSettings, QMainWindow):
             if self.page_id == "settings": self.background_file_label.setText(wallpaper_label(result))
             return True
         except Exception as exc:
-            self.toast("壁纸未应用："+str(exc),True)
+            self.toast(tr("壁纸未应用：")+str(exc),True)
             return False
 
     def choose_java(self):
-        path, _ = QFileDialog.getOpenFileName(self, "选择 Java 可执行文件", "", "Java (java.exe);;所有文件 (*)")
+        path, _ = QFileDialog.getOpenFileName(self, tr("选择 Java 可执行文件"), "", tr("Java (java.exe);;所有文件 (*)"))
         if path:
             self.settings_fields["java_path"].setText(path)
 
@@ -1561,12 +1820,12 @@ class LauncherWindow(LiveSettings, QMainWindow):
         def found(items):
             if self.page_id != "settings":
                 return
-            detected = combo([("", "选择检测到的 Java…")] + [(i["path"], "Java " + i["version"] + " · " + i["path"]) for i in items])
+            detected = combo([("", tr("选择检测到的 Java…"))] + [(i["path"], "Java " + i["version"] + " · " + i["path"]) for i in items])
             detected.setObjectName("detected-java")
             detected.currentIndexChanged.connect(lambda: self.settings_fields["java_path"].setText(detected.currentData() or ""))
             self.java_detected_layout.addWidget(detected)
             if not items:
-                self.toast("未检测到 Java，可启用自动下载")
+                self.toast(tr("未检测到 Java，可启用自动下载"))
         self.request("java", success=found)
 
     def open_dialog(self, dialog):
@@ -1576,12 +1835,12 @@ class LauncherWindow(LiveSettings, QMainWindow):
         return dialog
 
     def add_offline(self):
-        dialog = NativeDialog(self, "添加离线账号", "3–16 位英文、数字或下划线。", 500)
+        dialog = NativeDialog(self, tr("添加离线账号"), tr("3–16 位英文、数字或下划线。"), 500)
         dialog.resize(500, 300)
         name = text_input(placeholder="Steve", name="offline-name")
         name.setMaxLength(16)
-        dialog.body.addWidget(field("玩家名称", name))
-        submit = Button("添加账号", primary=True)
+        dialog.body.addWidget(field(tr("玩家名称"), name))
+        submit = Button(tr("添加账号"), primary=True)
         submit.setObjectName("offline-submit")
         def save():
             submit.setEnabled(False)
@@ -1591,7 +1850,7 @@ class LauncherWindow(LiveSettings, QMainWindow):
             def done(_):
                 dialog.accept()
                 self.refresh()
-                self.toast("离线账号已添加")
+                self.toast(tr("离线账号已添加"))
             self.request("accounts/offline", {"name": name.text().strip()}, done, failed)
         submit.clicked.connect(save)
         name.returnPressed.connect(save)
@@ -1600,7 +1859,7 @@ class LauncherWindow(LiveSettings, QMainWindow):
         name.setFocus()
 
     def delete_account(self, account_id):
-        if QMessageBox.question(self, "移除账号", "移除此账号？以后仍可重新登录。") == QMessageBox.Yes:
+        if QMessageBox.question(self, tr("移除账号"), tr("移除此账号？以后仍可重新登录。")) == QMessageBox.Yes:
             self.mutate("accounts/delete", {"id": account_id}, lambda _: self.navigate("accounts"))
 
     def microsoft_login(self):
@@ -1635,8 +1894,8 @@ class LauncherWindow(LiveSettings, QMainWindow):
             dialog.body.addWidget(editor)
             def load():
                 self.request("log?"+urllib.parse.urlencode({"instance":instance_id,"process":process_id}),success=lambda data:editor.setPlainText(data["text"]) if isValid(editor) and dialog.isVisible() else None)
-            dialog.footer.addWidget(Button("刷新",load))
-            dialog.footer.addWidget(Button("分析崩溃",lambda:(dialog.accept(),self.run_diagnostic(instance_id,"crash",process_id))))
+            dialog.footer.addWidget(Button(tr("刷新"),load))
+            dialog.footer.addWidget(Button(tr("分析崩溃"),lambda:(dialog.accept(),self.run_diagnostic(instance_id,"crash",process_id))))
             self.open_dialog(dialog)
             load()
             return
@@ -1655,14 +1914,14 @@ class LauncherWindow(LiveSettings, QMainWindow):
     def check_current(self):
         instance = self.selected_instance()
         if not instance:
-            self.toast("请先选择一个版本")
+            self.toast(tr("请先选择一个版本"))
             return
         self.run_diagnostic(instance["id"],"preflight")
 
     def run_diagnostic(self,instance_id,kind="preflight",process_id=None):
         if not self.service.diagnostics.configured():
             self.set_settings_category("ai")
-            self.toast("请先填写接口地址、模型和 API Key")
+            self.toast(tr("请先填写接口地址、模型和 API Key"))
             return
         body = {"instance":instance_id,"kind":kind}
         if process_id: body["process"] = process_id
@@ -1673,25 +1932,25 @@ class LauncherWindow(LiveSettings, QMainWindow):
         try:
             name = self.service.store.instance(instance_id)["name"]
         except LauncherError:
-            name = "游戏版本"
-        dialog = NativeDialog(self,"崩溃分析" if report.get("kind") == "crash" else "启动前排查",name,width=640)
+            name = tr("游戏版本")
+        dialog = NativeDialog(self,tr("崩溃分析") if report.get("kind") == "crash" else tr("启动前排查"),name,width=640)
         dialog.setObjectName("diagnostic-result")
         dialog.resize(min(640,self.width()),min(420,self.height()))
-        dialog.body.addWidget(label("原因","fieldLabel"))
-        cause = label(report.get("cause","暂时无法确定"),wrap=True)
+        dialog.body.addWidget(label(tr("原因"),"fieldLabel"))
+        cause = label(tr(report.get("cause",tr("暂时无法确定"))),wrap=True)
         cause.setObjectName("diagnostic-cause")
         dialog.body.addWidget(cause)
-        dialog.body.addWidget(label("建议解决方法","fieldLabel"))
-        suggestion = label(report.get("suggestion","请查看日志。"),wrap=True)
+        dialog.body.addWidget(label(tr("建议解决方法"),"fieldLabel"))
+        suggestion = label(tr(report.get("suggestion",tr("请查看日志。"))),wrap=True)
         suggestion.setObjectName("diagnostic-suggestion")
         dialog.body.addWidget(suggestion)
         if report.get("source") == "error":
-            dialog.body.addWidget(label("分析未完成","muted"))
+            dialog.body.addWidget(label(tr("分析未完成"),"muted"))
         if resume_account:
             def proceed():
                 dialog.accept()
                 self.mutate("instances/launch",{"id":instance_id,"account":resume_account,"skip_preflight":True},show_tasks=True)
-            resume = Button("仍然启动",proceed,True)
+            resume = Button(tr("仍然启动"),proceed,True)
             resume.setObjectName("diagnostic-launch-anyway")
             dialog.footer.addWidget(resume)
         self.open_dialog(dialog)
@@ -1700,28 +1959,28 @@ class LauncherWindow(LiveSettings, QMainWindow):
         self.flush_settings()
         values = self.collect_settings()
         body = {key:values.get(key,"") for key in ("ai_base_url","ai_model","ai_api_key","ai_clear_key")}
-        self.toast("正在测试模型接口…")
-        self.request("diagnostics/test",body,lambda _:self.toast("接口连接成功"))
+        self.toast(tr("正在测试模型接口…"))
+        self.request("diagnostics/test",body,lambda _:self.toast(tr("接口连接成功")))
 
     def show_latest_diagnostic(self):
         instance = self.selected_instance()
         if not instance:
-            self.toast("请先选择一个版本")
+            self.toast(tr("请先选择一个版本"))
             return
         def latest():
             reports = [self.service.diagnostics.latest(instance["id"],kind) for kind in ("crash","preflight")]
             return max(reports,key=lambda item:item.get("time",0))
-        self.async_call(latest,lambda report:self.show_diagnostic(report) if report else self.toast("还没有排查结果"))
+        self.async_call(latest,lambda report:self.show_diagnostic(report) if report else self.toast(tr("还没有排查结果")))
 
     def launch(self, instance_id):
         if not self.account():
-            self.toast("请先添加或登录一个账号")
+            self.toast(tr("请先添加或登录一个账号"))
             self.navigate("accounts")
             return
         self.mutate("instances/launch", {"id": instance_id, "account": self.account()["id"]}, show_tasks=True)
 
     def stop_game(self, instance_id,process_id=None):
-        if QMessageBox.question(self, "结束游戏", "请先在游戏中保存世界。现在结束游戏？") == QMessageBox.Yes:
+        if QMessageBox.question(self, tr("结束游戏"), tr("请先在游戏中保存世界。现在结束游戏？")) == QMessageBox.Yes:
             self.mutate("processes/stop" if process_id else "instances/stop", {"id": process_id or instance_id})
 
     def explore(self, kind="mod", instance=""):
@@ -1732,14 +1991,14 @@ class LauncherWindow(LiveSettings, QMainWindow):
         self.open_dialog(ProjectDialog(self, project, dict(self.search_state)))
 
     def import_menu(self):
-        dialog = NativeDialog(self, "添加游戏内容", width=540)
+        dialog = NativeDialog(self, tr("添加游戏内容"), width=540)
         dialog.resize(540, 290)
-        dialog.body.addWidget(Button("导入整合包（.mrpack / .zip）", lambda: (dialog.accept(), self.import_pack()), True))
-        dialog.body.addWidget(Button("添加 .minecraft 文件夹", lambda: (dialog.accept(), self.import_directory())))
+        dialog.body.addWidget(Button(tr("导入整合包（.mrpack / .zip）"), lambda: (dialog.accept(), self.import_pack()), True))
+        dialog.body.addWidget(Button(tr("添加 .minecraft 文件夹"), lambda: (dialog.accept(), self.import_directory())))
         self.open_dialog(dialog)
 
     def import_pack(self):
-        path, _ = QFileDialog.getOpenFileName(self, "选择整合包", "", "Minecraft 整合包 (*.mrpack *.zip)")
+        path, _ = QFileDialog.getOpenFileName(self, tr("选择整合包"), "", tr("Minecraft 整合包 (*.mrpack *.zip)"))
         if not path:
             return
         def operation(task):
@@ -1748,27 +2007,104 @@ class LauncherWindow(LiveSettings, QMainWindow):
             cached.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(str(source), str(cached))
             return self.service.content.import_pack(cached, task)
-        self.service.tasks.submit("导入整合包 · " + Path(path).name, operation)
+        self.service.tasks.submit(tr("导入整合包 · ") + Path(path).name, operation)
         self.refresh()
         self.navigate("downloads")
 
     def import_directory(self):
-        path = QFileDialog.getExistingDirectory(self, "添加 .minecraft 文件夹")
+        path = QFileDialog.getExistingDirectory(self, tr("添加 .minecraft 文件夹"))
         if path:
             def added(result):
                 self.data = self.service.state()
                 self.navigate("library")
-                message = "已添加文件夹 · {} 个版本".format(len(result["instances"]))
+                message = tr("已添加文件夹 · {} 个版本").format(len(result["instances"]))
                 if result.get("skipped"):
-                    message += " · {} 个版本需修复".format(len(result["skipped"]))
+                    message += tr(" · {} 个版本需修复").format(len(result["skipped"]))
                 self.toast(message)
             self.request("folders/add", {"path": path}, added)
+
+    def scan_minecraft_folders(self):
+        dialog = MinecraftScanDialog(self)
+        self.open_dialog(dialog)
+        dialog.start()
+        return dialog
 
     def about(self):
         self.navigate("about")
 
+    def open_launcher_updates(self, info=None):
+        from .update_ui import UpdateDialog
+        for dialog in self.dialogs:
+            if isinstance(dialog, UpdateDialog):
+                dialog.raise_()
+                dialog.activateWindow()
+                return dialog
+        return self.open_dialog(UpdateDialog(self, info if isinstance(info, dict) else None))
+
+    def startup_updates(self):
+        outcome = self.service.updater.take_outcome()
+        if outcome and outcome.get("status") == "failed":
+            self.toast(tr(outcome.get("message", "更新未完成，可重试或打开发布页")), True)
+        elif outcome and outcome.get("status") == "updated" and outcome.get("version") == __version__:
+            self.toast(tr("启动器已更新至 {}").format(__version__))
+        if self._update_checking or not self.service.updater.startup_due():
+            return
+        if any(dialog.objectName() == "launcher-update-dialog" for dialog in self.dialogs):
+            return
+        self._update_checking = True
+
+        def checked(info):
+            self._update_checking = False
+            if info.get("available") and not self._installing_update:
+                if self.dialogs or self.background_mode:
+                    self.toast(tr("发现启动器新版本 {}，可在关于页面更新").format(info["version"]))
+                else:
+                    self.open_launcher_updates(info)
+
+        def failed(_message):
+            # A failed background check must not interrupt launching or login.
+            self._update_checking = False
+
+        self.async_call(self.service.updater.check, checked, failed)
+
+    def update_block_reason(self):
+        if any(process["running"] or not process.get("finalized", True) for process in self.service.game.process_status()):
+            return "请先关闭所有游戏，再安装启动器更新"
+        if any(task["status"] in ("queued", "running") for task in self.service.tasks.list()):
+            return "请先等待或取消其他任务，再安装启动器更新"
+        with self.service.accounts.lock:
+            if any(session.get("status") == "pending" for session in self.service.accounts.sessions.values()):
+                return "请先完成或取消登录，再安装启动器更新"
+        return ""
+
+    def install_launcher_update(self, failed):
+        reason = self.update_block_reason()
+        if reason:
+            failed(reason)
+            return
+        if not self.flush_settings() or not self.flush_instance_settings():
+            failed(tr("设置未能保存，请处理设置错误后重试更新"))
+            return
+
+        def prepared(result):
+            reason = self.update_block_reason()
+            if reason:
+                failed(reason)
+                return
+            from .update_install import launch_executable
+            path, helper = result
+            try:
+                launch_executable(helper, ["--apply-update", str(path)])
+            except OSError:
+                failed(tr("无法启动更新辅助程序，原启动器未关闭"))
+                return
+            self._installing_update = True
+            self.close()
+
+        self.async_call(self.service.updater.prepare, prepared, failed)
+
     def show_licenses(self):
-        dialog = NativeDialog(self, "第三方组件与许可证", "Python · Qt · PySide · Shiboken", 780)
+        dialog = NativeDialog(self, tr("第三方组件与许可证"), "Python · Qt · PySide · Shiboken", 780)
         directory = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[1])) / "licenses"
         viewer = QPlainTextEdit()
         viewer.setReadOnly(True)
@@ -1782,17 +2118,25 @@ class LauncherWindow(LiveSettings, QMainWindow):
         self.open_dialog(dialog)
 
     def closeEvent(self, event):
+        if self._installing_update:
+            for dialog in list(self.dialogs):
+                dialog.reject()
+            self.timer.stop()
+            self.tray.hide()
+            event.accept()
+            QTimer.singleShot(0, QApplication.instance().quit)
+            return
         self.flush_settings()
         self.flush_instance_settings()
         self.data = self.service.state()
         active = [t for t in self.data["tasks"] if t["status"] in ("queued", "running")]
         if active:
             question = QMessageBox(self)
-            question.setWindowTitle("仍有任务正在执行")
-            question.setText("可以隐藏到后台继续执行，或取消任务后退出。")
-            background = question.addButton("后台继续", QMessageBox.AcceptRole)
-            cancel = question.addButton("取消任务并退出", QMessageBox.DestructiveRole)
-            question.addButton("返回", QMessageBox.RejectRole)
+            question.setWindowTitle(tr("仍有任务正在执行"))
+            question.setText(tr("可以隐藏到后台继续执行，或取消任务后退出。"))
+            background = question.addButton(tr("后台继续"), QMessageBox.AcceptRole)
+            cancel = question.addButton(tr("取消任务并退出"), QMessageBox.DestructiveRole)
+            question.addButton(tr("返回"), QMessageBox.RejectRole)
             question.exec()
             if question.clickedButton() == background:
                 self.hide_to_background()
@@ -1876,7 +2220,7 @@ class InstallForm(QWidget):
         box.setContentsMargins(0, 0, 0, 0)
         box.setSpacing(12)
         self.name = text_input(placeholder=version, name="instance-name")
-        box.addWidget(field("版本名称", self.name))
+        box.addWidget(field(tr("版本名称"), self.name))
         self.group = QButtonGroup(self)
         choices = QGridLayout()
         choices.setHorizontalSpacing(12)
@@ -1888,12 +2232,12 @@ class InstallForm(QWidget):
             frame, content = card()
             content.setContentsMargins(16, 12, 16, 12)
             content.setSpacing(6)
-            radio = QRadioButton(LOADERS[loader])
+            radio = QRadioButton(tr(LOADERS[loader]))
             radio.setObjectName("loader-" + loader)
             self.group.addButton(radio)
             radio.setChecked(loader == "vanilla")
             radio.setEnabled(loader == "vanilla")
-            status = label("不安装加载器" if loader == "vanilla" else "正在获取兼容版本…", "muted")
+            status = label(tr("不安装加载器") if loader == "vanilla" else tr("正在获取兼容版本…"), "muted")
             versions = combo([], name="loader-versions-" + loader)
             versions.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             versions.setMinimumWidth(0)
@@ -1901,7 +2245,7 @@ class InstallForm(QWidget):
             versions.setParent(frame)
             if loader == "vanilla":
                 versions.hide()
-            retry = Button("重试", lambda checked=False, key=loader: self.fetch_loader(key))
+            retry = Button(tr("重试"), lambda checked=False, key=loader: self.fetch_loader(key))
             retry.setFixedWidth(65)
             retry.hide()
             content.addLayout(row(radio, None, retry))
@@ -1921,12 +2265,12 @@ class InstallForm(QWidget):
         self.error_label.setStyleSheet("color:" + theme_color("danger").name())
         self.error_label.hide()
         box.addWidget(self.error_label)
-        self.submit = Button("↓ 安装游戏", self.install, True)
+        self.submit = Button(tr("↓ 安装游戏"), self.install, True)
         self.submit.setObjectName("install-submit")
         box.addWidget(self.submit)
         if not window.service.store.minecraft_root.is_dir():
-            self.error("请先在版本选择中创建 .minecraft 文件夹")
-            box.addWidget(Button("前往版本选择", lambda: window.navigate("library")))
+            self.error(tr("请先在版本选择中创建 .minecraft 文件夹"))
+            box.addWidget(Button(tr("前往版本选择"), lambda: window.navigate("library")))
         self.update_submit()
         for loader in ("forge", "neoforge", "fabric", "quilt"):
             self.fetch_loader(loader)
@@ -1940,7 +2284,7 @@ class InstallForm(QWidget):
         self.submit.setEnabled(not self.busy and available and self.window.service.store.minecraft_root.is_dir())
 
     def error(self, message):
-        self.error_label.setText(message)
+        self.error_label.setText(tr(message))
         self.error_label.setVisible(bool(message))
 
     def fetch_loader(self, loader):
@@ -1950,25 +2294,25 @@ class InstallForm(QWidget):
         self.update_submit()
         entry["radio"].setEnabled(False)
         entry["versions"].setEnabled(False)
-        entry["status"].setText("正在获取兼容版本…")
+        entry["status"].setText(tr("正在获取兼容版本…"))
         def received(items):
             if not isValid(self):
                 return
             entry["versions"].clear()
             for item in items:
-                entry["versions"].addItem(item["version"] + (" · 稳定版" if item.get("stable") else " · 测试版"), item["version"])
+                entry["versions"].addItem(item["version"] + (tr(" · 稳定版") if item.get("stable") else tr(" · 测试版")), item["version"])
             recommended = next((index for index, item in enumerate(items) if item.get("stable")), 0)
             entry["versions"].setCurrentIndex(recommended)
             entry["radio"].setEnabled(bool(items))
             entry["versions"].setEnabled(bool(items))
-            entry["status"].setText("{} 个兼容版本".format(len(items)) if items else "暂无兼容版本")
+            entry["status"].setText(tr("{} 个兼容版本").format(len(items)) if items else tr("暂无兼容版本"))
             if not items and self.selected_loader == loader:
                 self.rows["vanilla"]["radio"].setChecked(True)
             self.update_submit()
         def failed(message):
             if not isValid(self):
                 return
-            entry["status"].setText("获取失败")
+            entry["status"].setText(tr("获取失败"))
             entry["status"].setToolTip(message)
             entry["retry"].show()
             if self.selected_loader == loader:
@@ -1982,7 +2326,7 @@ class InstallForm(QWidget):
         self.busy = True
         self.update_submit()
         loader = self.selected_loader
-        name = self.name.text().strip() or (self.version + (" · " + LOADERS[loader] if loader != "vanilla" else ""))
+        name = self.name.text().strip() or (self.version + (" · " + tr(LOADERS[loader]) if loader != "vanilla" else ""))
         def failed(message):
             if isValid(self):
                 self.busy = False
@@ -1998,7 +2342,7 @@ class InstallForm(QWidget):
 
 class InstallDialog(NativeDialog):
     def __init__(self, window, version=None):
-        super().__init__(window, "安装 " + version if version else "安装版本", width=740)
+        super().__init__(window, tr("安装 ") + version if version else tr("安装版本"), width=740)
         if not version:
             QTimer.singleShot(0, lambda: (self.reject(), window.reset_install_version()))
             return
@@ -2012,10 +2356,10 @@ class InstallDialog(NativeDialog):
 
 class MicrosoftDialog(NativeDialog):
     def __init__(self, window):
-        super().__init__(window, "正版登录", width=520)
+        super().__init__(window, tr("正版登录"), width=520)
         self.resize(520, 280)
         self.session_id = None
-        self.description = label("请在 Windows 账户窗口完成登录", "muted", True)
+        self.description = label(tr("请在 Windows 账户窗口完成登录"), "muted", True)
         self.description.setObjectName("wam-status")
         self.body.addWidget(self.description)
         self.progress = GlassProgress()
@@ -2051,17 +2395,18 @@ class MicrosoftDialog(NativeDialog):
                 self.accept()
                 self.window.refresh()
                 self.window.navigate("home")
-                self.window.toast("已登录 " + result["account"]["name"])
+                self.window.toast(tr("已登录 ") + result["account"]["name"])
             elif result["status"] in ("failed", "cancelled"):
-                self.failed(result.get("error") or "登录已取消")
+                self.failed(result.get("error") or tr("登录已取消"))
         self.window.request("auth/status?id=" + self.session_id, success=received, error=self.failed)
 
     def failed(self, message):
         self.polling = False
         self.poller.stop()
         self.progress.hide()
-        self.description.setText("登录未完成")
+        self.description.setText(tr("登录未完成"))
         self.error(message)
+        self.resize(self.width(), min(420, self.window.height()))
 
     def cancel(self, *_):
         self.poller.stop()
@@ -2072,7 +2417,7 @@ class MicrosoftDialog(NativeDialog):
 
 class ProjectDialog(NativeDialog):
     def __init__(self, window, project, state):
-        super().__init__(window, project["title"], "选择与你的世界兼容的版本。", 750)
+        super().__init__(window, project["title"], tr("选择与你的世界兼容的版本。"), 750)
         self.project, self.state = project, state
         header = QHBoxLayout()
         header.addWidget(ProjectPreview(window.images, project.get("icon_url", ""), 96))
@@ -2084,11 +2429,11 @@ class ProjectDialog(NativeDialog):
         self.body.addLayout(header)
         self.container = QVBoxLayout()
         self.body.addLayout(self.container)
-        self.target = combo([(i["id"], i["name"] + " · " + i["game_version"] + " / " + LOADERS[i["loader"]]) for i in window.data["instances"]], state["instance"])
+        self.target = combo([(i["id"], i["name"] + " · " + i["game_version"] + " / " + tr(LOADERS[i["loader"]])) for i in window.data["instances"]], state["instance"])
         self.target.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         self.target.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         if state["kind"] != "modpack":
-            self.body.insertWidget(2, field("目标版本", self.target))
+            self.body.insertWidget(2, field(tr("目标版本"), self.target))
             self.target.currentIndexChanged.connect(self.load_versions)
         else:
             self.target.setParent(self)
@@ -2100,27 +2445,27 @@ class ProjectDialog(NativeDialog):
         self.generation += 1
         generation = self.generation
         clear_layout(self.container)
-        self.container.addWidget(label("正在获取版本列表…", "muted"))
+        self.container.addWidget(label(tr("正在获取版本列表…"), "muted"))
         params = {"project": str(self.project["project_id"]), "instance": self.target.currentData() or "" if self.state["kind"] != "modpack" else "", "kind": self.state["kind"], "provider": self.state["provider"]}
         def received(versions):
             if generation != self.generation or not self.isVisible():
                 return
             clear_layout(self.container)
             if not versions:
-                self.container.addWidget(empty("没有兼容版本", "检查游戏版本和加载器，或更换目标实例。"))
+                self.container.addWidget(empty(tr("没有兼容版本"), tr("检查游戏版本和加载器，或更换目标实例。")))
             for version in versions[:60]:
                 frame, box = card()
                 box.addWidget(ElidedLabel(version["name"], "section"))
                 box.addWidget(ElidedLabel(" / ".join(version.get("game_versions", [])[:7]) + " · " + version.get("date_published", "")[:10], "muted"))
                 box.addLayout(row(label(version.get("version_type", "release"), "badge"), None,
-                                  Button("↓ 安装", lambda checked=False, selected=version: self.install(selected), True)))
+                                  Button(tr("↓ 安装"), lambda checked=False, selected=version: self.install(selected), True)))
                 self.container.addWidget(frame)
         self.window.request("content/versions?" + urllib.parse.urlencode(params), success=received, error=self.error)
 
     def install(self, version):
         instance = "" if self.state["kind"] == "modpack" else self.target.currentData() or ""
         if self.state["kind"] != "modpack" and not instance:
-            self.error("请先创建一个游戏实例。")
+            self.error(tr("请先创建一个游戏实例。"))
             return
         self.window.mutate("content/install", {"project": str(self.project["project_id"]), "version": str(version["id"]), "instance": instance,
                             "kind": self.state["kind"], "provider": self.state["provider"]}, lambda _: self.accept(), show_tasks=True)
@@ -2136,7 +2481,7 @@ class InstancePanel(QWidget):
         self.panel = QVBoxLayout(self)
         self.panel.setContentsMargins(0, 0, 0, 0)
         self.panel.setSpacing(18)
-        title = {"overview": "版本概览", "settings": "版本设置", "mods": "模组管理", "resourcepacks": "资源包", "shaders": "光影", "saves": "存档管理", "logs": "日志"}[category]
+        title = {"overview": tr("版本概览"), "settings": tr("版本设置"), "mods": tr("模组管理"), "resourcepacks": tr("资源包"), "shaders": tr("光影"), "saves": tr("存档管理"), "logs": tr("日志")}[category]
         self.panel.addWidget(label(title, "section"))
         self.error_label = label("", "muted", True)
         self.error_label.setStyleSheet("color:" + theme_color("danger").name())
@@ -2149,7 +2494,7 @@ class InstancePanel(QWidget):
 
     def error(self, text):
         if isValid(self):
-            self.error_label.setText(text)
+            self.error_label.setText(tr(text))
             self.error_label.setVisible(bool(text))
 
     def active(self):
@@ -2164,29 +2509,29 @@ class InstancePanel(QWidget):
     def tab_overview(self):
         i = self.window.service.store.instance(self.instance_id)
         self.panel.addWidget(label(i["version"], "section", True))
-        self.panel.addWidget(label("准备就绪" if i["ready"] else "需要安装或修复", "muted"))
-        actions = [Button("游戏目录", lambda: self.folder("game")), Button("修复文件", lambda: self.task("instances/repair"))]
+        self.panel.addWidget(label(tr("准备就绪") if i["ready"] else tr("需要安装或修复"), "muted"))
+        actions = [Button(tr("游戏目录"), lambda: self.folder("game")), Button(tr("修复文件"), lambda: self.task("instances/repair"))]
         if not i.get("external_minecraft"):
-            actions.append(Button("复制版本", lambda: self.task("instances/duplicate")))
+            actions.append(Button(tr("复制版本"), lambda: self.task("instances/duplicate")))
         self.panel.addLayout(row(*actions))
-        self.panel.addLayout(row(Button("导出整合包", lambda: self.task("pack/export", {"instance": self.instance_id})), None, Button("移除列表记录" if i.get("external_minecraft") else "移至回收目录", self.delete, danger=True)))
+        self.panel.addLayout(row(Button(tr("导出整合包"), lambda: self.task("pack/export", {"instance": self.instance_id})), None, Button(tr("移除列表记录") if i.get("external_minecraft") else tr("移至回收目录"), self.delete, danger=True)))
 
     def delete(self):
         instance = self.window.service.store.instance(self.instance_id)
-        message = "从列表移除此版本记录？原文件夹内容会保留。" if instance.get("external_minecraft") else "将此实例及其存档移到本地 trash 目录？可手动恢复。"
-        if QMessageBox.question(self, "移除实例", message) == QMessageBox.Yes:
+        message = tr("从列表移除此版本记录？原文件夹内容会保留。") if instance.get("external_minecraft") else tr("将此实例及其存档移到本地 trash 目录？可手动恢复。")
+        if QMessageBox.question(self, tr("移除实例"), message) == QMessageBox.Yes:
             self.task("instances/delete")
 
     def tab_content(self):
         self.content_kind = {"mods": "mod", "resourcepacks": "resourcepack", "shaders": "shader"}[self.category]
-        self.local_query = text_input(placeholder="搜索文件", name="local-content-search")
+        self.local_query = text_input(placeholder=tr("搜索文件"), name="local-content-search")
         self.local_query.textChanged.connect(self.filter_local)
         self.panel.addWidget(self.local_query)
-        self.panel.addLayout(row(Button("导入", self.import_local), Button("检查更新", self.check_updates), Button("下载" + KINDS[self.content_kind], lambda: self.window.explore(self.content_kind, self.instance_id), True)))
+        self.panel.addLayout(row(Button(tr("导入"), self.import_local), Button(tr("检查更新"), self.check_updates), Button(tr("下载") + tr(KINDS[self.content_kind]), lambda: self.window.explore(self.content_kind, self.instance_id), True)))
         self.local_items = []
         self.local_layout = QVBoxLayout()
         self.panel.addLayout(self.local_layout)
-        self.local_layout.addWidget(label("正在读取…", "muted"))
+        self.local_layout.addWidget(label(tr("正在读取…"), "muted"))
         QTimer.singleShot(0, self.refresh_content)
 
     def refresh_content(self):
@@ -2205,57 +2550,57 @@ class InstancePanel(QWidget):
         query = self.local_query.text().strip().lower()
         items = [item for item in self.local_items if item["kind"] == self.content_kind and query in item["filename"].lower()]
         if not items:
-            self.local_layout.addWidget(empty("没有匹配的文件" if query else "暂无" + KINDS[self.content_kind], ""))
+            self.local_layout.addWidget(empty(tr("没有匹配的文件") if query else tr("暂无") + tr(KINDS[self.content_kind]), ""))
         for item in items:
             frame, box = card()
             box.addWidget(ElidedLabel(item["filename"], "section"))
             box.addLayout(row(label(human_bytes(item["size"]), "muted"), None,
-                              Button("禁用" if item["enabled"] else "启用", lambda checked=False, value=item: self.toggle(value)),
-                              Button("移除", lambda checked=False, value=item: self.toggle(value, True), danger=True)))
+                              Button(tr("禁用") if item["enabled"] else tr("启用"), lambda checked=False, value=item: self.toggle(value)),
+                              Button(tr("移除"), lambda checked=False, value=item: self.toggle(value, True), danger=True)))
             self.local_layout.addWidget(frame)
 
     def toggle(self, item, remove=False):
-        if remove and QMessageBox.question(self, "移除内容", "将此文件移到实例回收目录？") != QMessageBox.Yes:
+        if remove and QMessageBox.question(self, tr("移除内容"), tr("将此文件移到实例回收目录？")) != QMessageBox.Yes:
             return
         self.window.mutate("content/toggle", {"instance": self.instance_id, "kind": item["kind"], "filename": item["filename"], "remove": remove})
 
     def import_local(self):
         kind = self.content_kind
-        path, _ = QFileDialog.getOpenFileName(self, "导入 " + KINDS[kind], "", "模组 (*.jar)" if kind == "mod" else "资源文件 (*.zip)")
+        path, _ = QFileDialog.getOpenFileName(self, tr("导入 ") + tr(KINDS[kind]), "", tr("模组 (*.jar)") if kind == "mod" else tr("资源文件 (*.zip)"))
         if not path:
             return
         def copy(task):
             self.window.service.content._check_mod_instance(self.instance_id, kind)
             destination = safe_path(self.window.service.content._folder(self.instance_id, kind), Path(path).name)
             if destination.exists():
-                raise LauncherError("目标实例中已有同名文件")
+                raise LauncherError(tr("目标实例中已有同名文件"))
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(path, str(destination))
-        self.window.service.tasks.submit("导入本地内容", copy)
+        self.window.service.tasks.submit(tr("导入本地内容"), copy)
         self.window.refresh()
 
     def check_updates(self):
-        self.error("正在检查更新…")
+        self.error(tr("正在检查更新…"))
         def received(items):
             if not self.active():
                 return
             items = [item for item in items if item["kind"] == self.content_kind]
-            self.error("发现 {} 个更新".format(len(items)) if items else "暂无更新")
+            self.error(tr("发现 {} 个更新").format(len(items)) if items else tr("暂无更新"))
             if not items:
                 return
             clear_layout(self.local_layout)
             for item in items:
                 frame, box = card()
                 box.addWidget(label(item["filename"], wrap=True))
-                box.addWidget(label("可更新至 " + item["new_name"], "muted", True))
-                box.addWidget(Button("更新", lambda checked=False, value=item: self.window.mutate("content/install", {"project": value["project_id"], "version": value["new_version"], "instance": self.instance_id, "kind": value["kind"], "provider": value["provider"]}), True))
+                box.addWidget(label(tr("可更新至 ") + item["new_name"], "muted", True))
+                box.addWidget(Button(tr("更新"), lambda checked=False, value=item: self.window.mutate("content/install", {"project": value["project_id"], "version": value["new_version"], "instance": self.instance_id, "kind": value["kind"], "provider": value["provider"]}), True))
                 self.local_layout.addWidget(frame)
         self.window.request("content/updates?instance=" + self.instance_id, success=received, error=self.error)
 
     def tab_logs(self):
-        self.log_type = combo([("game", "游戏启动日志"), ("installer", "加载器安装日志")])
+        self.log_type = combo([("game", tr("游戏启动日志")), ("installer", tr("加载器安装日志"))])
         self.log_type.currentIndexChanged.connect(self.load_log)
-        self.panel.addLayout(row(self.log_type, Button("刷新", self.load_log), Button("打开目录", lambda: self.folder("instance")),Button("分析崩溃",lambda:self.window.run_diagnostic(self.instance_id,"crash"))))
+        self.panel.addLayout(row(self.log_type, Button(tr("刷新"), self.load_log), Button(tr("打开目录"), lambda: self.folder("instance")),Button(tr("分析崩溃"),lambda:self.window.run_diagnostic(self.instance_id,"crash"))))
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
         self.log.setMinimumHeight(280)
@@ -2267,7 +2612,7 @@ class InstancePanel(QWidget):
         self.window.request("log?" + urllib.parse.urlencode({"instance": self.instance_id, "type": self.log_type.currentData()}), success=lambda data: self.log.setPlainText(data["text"]) if self.active() and self.category == "logs" else None, error=self.error)
 
     def tab_saves(self):
-        self.panel.addLayout(row(Button("存档目录", lambda: self.folder("saves")), Button("备份目录", lambda: self.folder("backups")), Button("备份世界", lambda: self.window.mutate("backup", {"instance": self.instance_id}), True)))
+        self.panel.addLayout(row(Button(tr("存档目录"), lambda: self.folder("saves")), Button(tr("备份目录"), lambda: self.folder("backups")), Button(tr("备份世界"), lambda: self.window.mutate("backup", {"instance": self.instance_id}), True)))
         try:
             directory = self.window.service.store.game_dir(self.instance_id) / "saves"
         except LauncherError as exc:
@@ -2277,11 +2622,11 @@ class InstancePanel(QWidget):
         for world in worlds:
             frame, box = card()
             box.addWidget(ElidedLabel(world.name, "section"))
-            box.addLayout(row(label(time.strftime("%Y-%m-%d %H:%M", time.localtime(world.stat().st_mtime)), "muted"), None, Button("打开", lambda checked=False, name=world.name: self.window.mutate("folder", {"instance": self.instance_id, "target": "world", "world": name}))))
+            box.addLayout(row(label(time.strftime("%Y-%m-%d %H:%M", time.localtime(world.stat().st_mtime)), "muted"), None, Button(tr("打开"), lambda checked=False, name=world.name: self.window.mutate("folder", {"instance": self.instance_id, "target": "world", "world": name}))))
             self.panel.addWidget(frame)
         if not worlds:
-            self.panel.addWidget(empty("暂无存档", ""))
-        self.panel.addWidget(label("备份", "section"))
+            self.panel.addWidget(empty(tr("暂无存档"), ""))
+        self.panel.addWidget(label(tr("备份"), "section"))
         self.backups = QVBoxLayout()
         self.panel.addLayout(self.backups)
         QTimer.singleShot(0, self.load_backups)
@@ -2294,27 +2639,27 @@ class InstancePanel(QWidget):
             for item in items:
                 self.backups.addWidget(label(item["name"] + " · " + human_bytes(item["size"]), "muted"))
             if not items:
-                self.backups.addWidget(label("暂无备份", "muted"))
+                self.backups.addWidget(label(tr("暂无备份"), "muted"))
         self.window.request("backups?instance=" + self.instance_id, success=received, error=self.error)
 
     def tab_settings(self):
         current = self.window.service.store.instance(self.instance_id)
         current.update(self.window.instance_drafts.get(self.instance_id, {}))
         self.instance_fields = {}
-        for key, text in (("name", "实例名称"), ("java_path", "Java 路径（留空继承全局）"), ("jvm_args", "额外 JVM 参数"), ("game_args", "额外游戏参数")):
+        for key, text in (("name", tr("实例名称")), ("java_path", tr("Java 路径（留空继承全局）")), ("jvm_args", tr("额外 JVM 参数")), ("game_args", tr("额外游戏参数"))):
             widget = text_input(current.get(key, ""))
             self.instance_fields[key] = widget
             self.panel.addWidget(field(text, widget))
         memory = QSpinBox()
         memory.setRange(512, 65536)
         memory.setValue(current.get("memory") or 4096)
-        mode = combo([("inherit", "继承全局"), ("auto", "自动分配"), ("manual", "手动分配")], current.get("memory_mode") or ("manual" if current.get("memory", 0) else "inherit"))
+        mode = combo([("inherit", tr("继承全局")), ("auto", tr("自动分配")), ("manual", tr("手动分配"))], current.get("memory_mode") or ("manual" if current.get("memory", 0) else "inherit"))
         self.instance_fields["memory_mode"] = mode
         self.instance_fields["memory"] = memory
         mode.currentIndexChanged.connect(lambda: memory.setEnabled(mode.currentData() == "manual"))
         memory.setEnabled(mode.currentData() == "manual")
-        self.panel.addWidget(field("内存分配", mode))
-        self.panel.addWidget(field("手动内存 / MB", memory))
+        self.panel.addWidget(field(tr("内存分配"), mode))
+        self.panel.addWidget(field(tr("手动内存 / MB"), memory))
         for widget in self.instance_fields.values():
             if isinstance(widget,QLineEdit):
                 widget.textChanged.connect(lambda _=None:self.changed(350))
@@ -2337,7 +2682,7 @@ class InstancePanel(QWidget):
 
 def run_desktop(data_root, *, minecraft_root=None, quit_after=0, screenshot=""):
     app = QApplication.instance() or QApplication([])
-    app.setApplicationName("星月启动器")
+    app.setApplicationName(tr("星月启动器"))
     app.setOrganizationName("StarMoon")
     app.setStyle("Fusion")
     palette = QPalette()
@@ -2365,4 +2710,6 @@ def run_desktop(data_root, *, minecraft_root=None, quit_after=0, screenshot=""):
         QTimer.singleShot(1000, capture)
     if quit_after:
         QTimer.singleShot(int(quit_after*1000), app.quit)
+    elif getattr(sys, "frozen", False):
+        QTimer.singleShot(2000, window.startup_updates)
     return app.exec()

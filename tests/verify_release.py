@@ -29,6 +29,8 @@ modules = archive.open_embedded_archive("PYZ.pyz").toc
 assert "launcher.diagnostics" in modules and "tomli" in modules and "launcher.live_settings" in modules
 assert "launcher.appearance" in modules and "launcher.player_skins" in modules
 assert "launcher.wallpaper_ui" in modules
+assert "launcher.i18n" in modules and "launcher.translations" in modules
+assert all(name in modules for name in ("launcher.updater", "launcher.update_install", "launcher.update_ui"))
 assert archive.extract(names["assets/default-background.jpg"]) == (root / "assets/default-background.jpg").read_bytes()
 for preset,_,filename in BACKGROUND_PRESETS:
     asset = "assets/"+filename
@@ -48,6 +50,12 @@ for index in range(count):
     size, offset = struct.unpack_from("<II", icon, 6 + index * 16 + 8)
     expected.add(hashlib.sha256(icon[offset:offset + size]).hexdigest())
 pe = pefile.PE(str(executable))
+fixed = pe.VS_FIXEDFILEINFO[0]
+expected_version = tuple(int(part) for part in __version__.split(".")) + (0,)
+assert (fixed.FileVersionMS >> 16, fixed.FileVersionMS & 65535, fixed.FileVersionLS >> 16, fixed.FileVersionLS & 65535) == expected_version
+strings = {key.decode("utf-8"): value.decode("utf-8") for entries in pe.FileInfo for entry in entries
+           if hasattr(entry, "StringTable") for table in entry.StringTable for key, value in table.entries.items()}
+assert strings["ProductVersion"] == __version__
 actual = set()
 for entry in pe.DIRECTORY_ENTRY_RESOURCE.entries:
     if entry.id == 3:
@@ -73,6 +81,7 @@ assert smoke["success"] and smoke["version"] == __version__ and smoke["wam_runti
 assert not (isolated / ".Minecraft").exists()
 config = json.loads((isolated / "data/config.json").read_text(encoding="utf-8"))
 assert config["memory_auto"] and config["download_parallel"]
+assert config["auto_check_updates"]
 assert config["background_mode"] == "default" and not config["background_path"]
 assert config["background_preset"] == "default"
 assert (config["launcher_width"],config["launcher_height"]) == (900,600)
@@ -95,11 +104,23 @@ second = Image.open(again_image).convert("RGBA")
 sample = (first.width-55,first.height-70,first.width-25,first.height-40)
 assert first.crop(sample).tobytes() != pixels.crop(sample).tobytes()
 assert first.crop(sample).tobytes() == second.crop(sample).tobytes()
+config = json.loads((isolated / "data/config.json").read_text(encoding="utf-8"))
+config["language"] = "en_US"
+(isolated / "data/config.json").write_text(json.dumps(config), encoding="utf-8")
+for name in ("english-first.png", "english-restart.png"):
+    result = subprocess.run([str(copy), "--smoke-test", "--screenshot", str(isolated / name)], env=environment, timeout=60)
+    assert result.returncode == 0
+    english = json.loads((isolated / "data/native-smoke-result.json").read_text(encoding="utf-8"))
+    assert english["success"] and english["language"] == "en_US"
+    assert english["display_name"] == "StarMoonLauncher"
+    assert json.loads((isolated / "data/config.json").read_text(encoding="utf-8"))["language"] == "en_US"
 record = {"version": __version__, "size": executable.stat().st_size,
           "executable":str(executable),
           "sha256": hashlib.sha256(executable.read_bytes()).hexdigest(),
           "isolated": str(isolated), "new_icon_resources": len(expected),
           "single_exe_smoke": True, "transparent_corners": True,
-          "bundled_wallpapers":len(BACKGROUND_PRESETS), "preset_survives_reextraction":True}
+          "bundled_wallpapers":len(BACKGROUND_PRESETS), "preset_survives_reextraction":True,
+          "english_survives_reextraction": True, "languages": ["zh_CN", "en_US"], "auto_update_modules": True,
+          "windows_file_version": strings["FileVersion"]}
 (output/"release-verification.json").write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
-print("ISOLATED_EXE_WALLPAPERS_PRESET_RESTART_WAM_AND_CORNERS_OK", flush=True)
+print("ISOLATED_EXE_ENGLISH_WALLPAPERS_PRESET_RESTART_WAM_AND_CORNERS_OK", flush=True)

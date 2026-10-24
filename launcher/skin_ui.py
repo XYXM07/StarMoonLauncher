@@ -3,6 +3,7 @@ from PySide6.QtCore import QRectF, Qt
 from PySide6.QtGui import QColor, QImage, QPainter, QPixmap
 from PySide6.QtWidgets import QWidget
 from .material import paint_glass
+from .i18n import tr
 from .themes import color
 
 
@@ -40,7 +41,7 @@ class SkinPreview(QWidget):
         paint_glass(self,painter,sample=False,strength=.6)
         if self.image.isNull():
             painter.setPen(color("muted"))
-            painter.drawText(self.rect(),Qt.AlignCenter,"选择 PNG 皮肤")
+            painter.drawText(self.rect(),Qt.AlignCenter,tr("选择 PNG 皮肤"))
             return
         scale = min((self.height()-55)/32,(self.width()-80)/40)
         slim = self.model == "slim"
@@ -69,5 +70,5 @@ class SkinPreview(QWidget):
                 part(8,20,4,12,12 if back else 4,52)
             painter.restore()
         painter.setPen(color("muted"))
-        painter.drawText(QRectF(0,self.height()-30,self.width()*.6,20),Qt.AlignCenter,"正面")
-        painter.drawText(QRectF(self.width()*.4,self.height()-30,self.width()*.6,20),Qt.AlignCenter,"背面")
+        painter.drawText(QRectF(0,self.height()-30,self.width()*.6,20),Qt.AlignCenter,tr("正面"))
+        painter.drawText(QRectF(self.width()*.4,self.height()-30,self.width()*.6,20),Qt.AlignCenter,tr("背面"))

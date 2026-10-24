@@ -9,6 +9,7 @@ from PySide6.QtGui import QColor, QIcon, QImageReader, QLinearGradient, QPainter
 from PySide6.QtWidgets import QDialog, QHBoxLayout, QLabel, QWidget
 
 from .widgets import Button
+from .i18n import tr
 from .material import blur_backdrop, paint_glass
 from .themes import palette, color, blend
 
@@ -77,16 +78,45 @@ def resize_hit(window, message):
     return None
 
 
+class WindowControlButton(Button):
+    """Caption symbols stay optically centered regardless of the UI font."""
+    def __init__(self, symbol, callback, tip, danger=False):
+        super().__init__("", callback, danger=danger)
+        self.symbol = symbol
+        self.setAccessibleName(tip)
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        pen = QPen(color("danger" if self.danger else "text"), 1.4)
+        pen.setCapStyle(Qt.RoundCap)
+        painter.setPen(pen)
+        center = QRectF(self.rect()).center()
+        x, y = center.x(), center.y()
+        if self.symbol == "×":
+            painter.drawLine(QPointF(x - 3.5, y - 3.5), QPointF(x + 3.5, y + 3.5))
+            painter.drawLine(QPointF(x - 3.5, y + 3.5), QPointF(x + 3.5, y - 3.5))
+        elif self.symbol == "−":
+            painter.drawLine(QPointF(x - 4, y), QPointF(x + 4, y))
+        else:
+            painter.drawRect(QRectF(x - 4, y - 4, 8, 8))
+
+
 class TitleBar(QWidget):
     def __init__(self, owner, title="", full=False):
         super().__init__(owner)
         self.owner = owner
         self.full = full
         self.setObjectName("topbar")
-        self.setFixedHeight(64 if full else 50)
+        self.setFixedHeight(64 if full else 44)
         self.layout = QHBoxLayout(self)
-        self.layout.setContentsMargins(20, 0, 12, 0)
+        # Dialog glass reserves 3 px above and 7 px below for its shadow.
+        # Align captions with that visible surface instead of the whole widget.
+        top, bottom = (0, 0) if full else (3, 7)
+        self.layout.setContentsMargins(20 if full else 18, top, 12 if full else 8, bottom)
         self.layout.setSpacing(8)
+        self.layout.setAlignment(Qt.AlignVCenter)
         if title:
             self.title = QLabel(title)
             self.title.setObjectName("brand" if full else "section")
@@ -100,18 +130,18 @@ class TitleBar(QWidget):
 
     def add_controls(self):
         if self.full:
-            self.add_control("−", "最小化", self.owner.showMinimized, "window-minimize")
-            self.maximize = self.add_control("□", "最大化 / 还原", self.toggle_maximized, "window-maximize")
+            self.add_control("−", tr("最小化"), self.owner.showMinimized, "window-minimize")
+            self.maximize = self.add_control("□", tr("最大化 / 还原"), self.toggle_maximized, "window-maximize")
         callback = self.owner.reject if isinstance(self.owner, QDialog) else self.owner.close
-        self.add_control("×", "关闭", callback, "window-close", True)
+        self.add_control("×", tr("关闭"), callback, "window-close", True)
 
     def add_control(self, text, tip, callback, name, danger=False):
-        button = Button(text, callback, danger=danger)
+        button = WindowControlButton(text, callback, tip, danger=danger)
         button.setMinimumSize(34, 32)
         button.setFixedSize(34, 32)
         button.setObjectName(name)
         button.setToolTip(tip)
-        self.layout.addWidget(button)
+        self.layout.addWidget(button, 0, Qt.AlignVCenter)
         self.controls.append(button)
         return button
 

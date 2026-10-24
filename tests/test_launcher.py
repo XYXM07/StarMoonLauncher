@@ -424,5 +424,50 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(launch["name"], "Renamed")
         self.assertEqual(launch["xuid"], "xuid")
 
+    def test_instance_reads_wait_for_atomic_metadata_updates(self):
+        instance = self.app.game.create("Before", "1.20.1")
+        metadata = self.app.store.instance_dir(instance["id"]) / "instance.json"
+        entered, release, started, done = (threading.Event() for _ in range(4))
+        original = atomic_json
+        result, errors = [], []
+
+        def delayed_write(path, value):
+            if Path(path) == metadata and value.get("name") == "Changed":
+                entered.set()
+                release.wait(3)
+            return original(path, value)
+
+        def write():
+            try:
+                self.app.store.update_instance(instance["id"], {"name": "Changed"})
+            except Exception as exc:
+                errors.append(exc)
+
+        def read():
+            started.set()
+            try:
+                result.append(self.app.store.instance(instance["id"]))
+            except Exception as exc:
+                errors.append(exc)
+            finally:
+                done.set()
+
+        writer, reader = threading.Thread(target=write), threading.Thread(target=read)
+        with patch("launcher.core.atomic_json", side_effect=delayed_write):
+            writer.start()
+            try:
+                self.assertTrue(entered.wait(2))
+                reader.start()
+                self.assertTrue(started.wait(2))
+                self.assertFalse(done.wait(.1), "A metadata reader bypassed an in-progress update")
+            finally:
+                release.set()
+                writer.join(3)
+                if reader.ident is not None:
+                    reader.join(3)
+        self.assertEqual(errors, [])
+        self.assertEqual(result[0]["name"], "Changed")
+
+
 if __name__ == "__main__":
     unittest.main()

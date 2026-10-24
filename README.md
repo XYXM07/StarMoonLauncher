@@ -1,8 +1,10 @@
 # 星月启动器
 
-由 **星月晓梦** 制作的 Windows Minecraft Java 版第三方启动器。使用 Python / PySide6 构建，提供原生无边框液态玻璃界面，可打包为单个 EXE。当前版本 **0.7.5**。
+[English](README.en.md)
 
-[下载 Windows 64 位单文件版](https://github.com/XYXM07/StarMoonLauncher/releases/download/v0.7.5/StarMoonLauncher-0.7.5-windows-x64.exe) · [GitHub Releases](https://github.com/XYXM07/StarMoonLauncher/releases)
+由 **星月晓梦** 制作的 Windows Minecraft Java 版第三方启动器。使用 Python / PySide6 构建，提供原生无边框液态玻璃界面，可打包为单个 EXE。当前版本 **0.7.6**。
+
+[下载 Windows 64 位单文件版](https://github.com/XYXM07/StarMoonLauncher/releases/download/v0.7.6/StarMoonLauncher-0.7.6-windows-x64.exe) · [GitHub Releases](https://github.com/XYXM07/StarMoonLauncher/releases)
 
 下载 EXE 后直接双击运行，无需安装 Python 或自行编译。
 
@@ -13,9 +15,12 @@
 - 离线账号、Windows Web Account Manager 微软登录。
 - 游戏安装与启动、Forge / NeoForge / Fabric / Quilt、同版本和不同版本多开。
 - PCL 式版本管理，直接添加已有 `.minecraft`，管理模组、存档与版本参数。
+- 扫描本机或指定目录下的 `.minecraft`，勾选后批量添加；扫描可随时停止。
 - 官方源 / BMCLAPI 镜像、分段下载、任务进度和速度显示。
 - Modrinth / CurseForge 内容检索、模组与整合包下载；CurseForge 需要自行配置 API Key。
 - 七种界面配色、动效、可调玻璃效果、自定义壁纸与六张预设壁纸。
+- 简体中文 / English 切换，位于「设置 → 外观 → 语言 / Language」，即时生效并自动保存。
+- 从 GitHub Releases 检查和下载正式更新，校验后原位替换 EXE 并重启；游戏或任务运行时暂缓安装。[更新说明](docs/UPDATING.md)
 - 离线皮肤自定义、公开正版玩家皮肤预览与 PNG 下载。
 - 自动内存分配、可选模型崩溃分析和启动前模组排查。
 
@@ -23,7 +28,11 @@
 
 ## 使用
 
-运行打包后的 `星月启动器-0.7.5.exe`。首次打开不会自动创建游戏目录；在「启动 → 版本选择」中选择「创建 .minecraft 文件夹」或「添加 .minecraft 文件夹」。下载游戏后选择版本与账号，再启动。
+运行 `StarMoonLauncher-0.7.6-windows-x64.exe`。首次打开不会自动创建游戏目录；在「启动 → 版本选择」中选择「创建 .minecraft 文件夹」或「添加 .minecraft 文件夹」。下载游戏后选择版本与账号，再启动。
+
+在版本选择左侧点击「扫描 .minecraft 文件夹」：默认递归扫描本机硬盘和可移动磁盘，也可指定扫描目录。扫描结果显示路径、版本数和已添加状态，勾选后批量添加；停止扫描会保留已找到的结果。无权限目录和目录链接会跳过，游戏文件继续保留在原位置。
+
+发布者已确认正版登录应用审核通过。登录使用 Windows Web Account Manager，玩家仍需拥有 Minecraft Java 版及可用的 Xbox 档案。失败时会显示具体授权阶段与错误码。
 
 账号、设置、缓存和运行时保存在 EXE 同目录的 `data/`，兼容旧 `BlockCraft/data/`。移动便携目录时一起保留数据。已有启动器使用同一数据目录时，新进程会唤起旧窗口；更新前先完全退出旧版。
 
@@ -42,7 +51,7 @@ py -3.11 -m venv .venv
 构建单文件 EXE：
 
 ```powershell
-.\.venv\Scripts\python.exe build.py --output-name 星月启动器-0.7.5
+.\.venv\Scripts\python.exe build.py --output-name StarMoonLauncher-0.7.6-windows-x64
 ```
 
 运行回归测试：

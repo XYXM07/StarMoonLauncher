@@ -1,6 +1,6 @@
 # 上传 GitHub
 
-当前公开仓库：[XYXM07/StarMoonLauncher](https://github.com/XYXM07/StarMoonLauncher)。主分支为 `main`，对应星月启动器 0.7.5 源码。
+当前公开仓库：[XYXM07/StarMoonLauncher](https://github.com/XYXM07/StarMoonLauncher)。主分支为 `main`，对应星月启动器 0.7.6 源码。
 
 ## 源码包
 
@@ -10,7 +10,7 @@ python scripts/export_source.py
 
 当前版本的源码目录和 ZIP 位于 `release-source/`，包含 Python 源码、构建配置、必需资源、测试和文档。默认输出已存在时会停止，可通过 `--output 新目录` 重新导出。
 
-网页上传时解压 ZIP，进入 `StarMoonLauncher-0.7.5/` 后上传其中内容。保留 `.github/`、`.gitignore` 等以点开头的文件与目录。
+网页上传时解压 ZIP，进入 `StarMoonLauncher-0.7.6/` 后上传其中内容。保留 `.github/`、`.gitignore` 等以点开头的文件与目录。
 
 ## Git 上传
 
