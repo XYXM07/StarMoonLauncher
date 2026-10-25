@@ -924,7 +924,8 @@ class NativeTests(unittest.TestCase):
             panel = self.window.instance_panel
             wait_for(lambda: len(panel.local_items) == 3)
             self.assertEqual(panel.content_kind, kind)
-            self.assertEqual(panel.local_layout.count(), 1)
+            expected = {"mod": "test.jar", "resourcepack": "resources.zip", "shader": "lighting.zip"}[kind]
+            wait_for(lambda: any(item.full_text == expected for item in panel.findChildren(ElidedLabel)))
         QTest.mouseClick(self.window.sidebar.findChild(Button, "instance-saves"), Qt.LeftButton)
         self.assertTrue(any(w.full_text == "World One" for w in self.window.instance_panel.findChildren(ElidedLabel)))
         self.window.set_settings_category("account")

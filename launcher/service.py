@@ -49,7 +49,7 @@ class Application:
 
     def config_update(self, changes):
         allowed = {"source", "memory", "memory_auto", "java_path", "java_auto", "width", "height", "jvm_args", "game_args", "client_id", "curseforge_key", "concurrency", "selected_instance", "selected_account", "theme", "animations", "login_mode", "offline_name", "background_path", "background_opacity", "glass_opacity", "glass_refraction", "download_parallel", "download_segments", "launcher_width", "launcher_height"}
-        allowed.update(("color_scheme","ai_base_url","ai_model","ai_crash_analysis","ai_auto_preflight"))
+        allowed.update(("color_scheme","ai_base_url","ai_model","ai_crash_analysis","ai_auto_preflight","ai_github_search","ai_pack_download_fallback"))
         allowed.update(("background_mode","background_preset"))
         allowed.add("language")
         allowed.add("auto_check_updates")
@@ -66,7 +66,7 @@ class Application:
             raise LauncherError("未知预设壁纸")
         if "color_scheme" in changes and changes["color_scheme"] not in ("starmoon","aurora","morandi","graphite","glacier","twilight","night"):
             raise LauncherError("未知配色")
-        for key in ("ai_crash_analysis","ai_auto_preflight","auto_check_updates"):
+        for key in ("ai_crash_analysis","ai_auto_preflight","auto_check_updates","ai_github_search","ai_pack_download_fallback"):
             if key in changes: changes[key] = bool(changes[key])
         if "ai_base_url" in changes:
             changes["ai_base_url"] = str(changes["ai_base_url"]).strip().rstrip("/")
@@ -211,6 +211,9 @@ class Application:
             if path == "/api/tasks/cancel":
                 self.tasks.cancel_task(body["id"])
                 return {}
+            if path == "/api/tasks/respond":
+                self.tasks.respond(body["id"], body["request"], body["choice"])
+                return {}
             if path == "/api/tasks/dismiss":
                 self.tasks.dismiss(body.get("id"))
                 if not body.get("id"):
@@ -291,7 +294,8 @@ class Application:
                 from .folders import add_folder
                 return add_folder(self.game, body["path"])
             if path == "/api/content/install":
-                return self.tasks.submit("安装下载内容", lambda t: self.content.install_project(str(body["project"]), str(body["version"]), body.get("instance", ""), body["kind"], body.get("provider", "modrinth"), t))
+                options = {"allow_unknown": body.get("allow_unknown") is True} if body.get("provider") == "github" else {}
+                return self.tasks.submit("安装下载内容", lambda t: self.content.install_project(str(body["project"]), str(body["version"]), body.get("instance", ""), body["kind"], body.get("provider", "modrinth"), t, **options))
             if path == "/api/content/toggle":
                 return self.tasks.submit("管理实例内容", lambda t: self.content.toggle(body["instance"], body["filename"], body["kind"], body.get("remove", False)))
             if path == "/api/pack/export":

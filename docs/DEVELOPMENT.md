@@ -15,10 +15,10 @@ py -3.11 -m venv .venv
 ## 构建单文件 EXE
 
 ```powershell
-.\.venv\Scripts\python.exe build.py --output-name StarMoonLauncher-0.7.6-windows-x64
+.\.venv\Scripts\python.exe build.py --output-name StarMoonLauncher-0.7.7-windows-x64
 ```
 
-输出为 `dist/StarMoonLauncher-0.7.6-windows-x64.exe`，Windows 文件属性中的版本号与 `launcher/__init__.py` 保持一致。构建脚本一并内置图标、六张预设壁纸、WAM 运行库、离线皮肤代理和第三方许可。无需 Node.js、浏览器前端或额外运行库目录。
+输出为 `dist/StarMoonLauncher-0.7.7-windows-x64.exe`，Windows 文件属性中的版本号与 `launcher/__init__.py` 保持一致。构建脚本一并内置图标、六张预设壁纸、WAM 运行库、离线皮肤代理和第三方许可。无需 Node.js、浏览器前端或额外运行库目录。
 
 构建成功后更新 `dist/current-launcher.txt`，供验收脚本自动定位输出文件。同一个 EXE 正在运行时 Windows 无法覆盖它。
 

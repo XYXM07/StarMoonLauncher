@@ -166,7 +166,7 @@ class GameManager:
             data = merge_profiles(self.profile(data["inheritsFrom"], seen), data)
         return data
 
-    def create(self, name, version, loader="vanilla", loader_version=""):
+    def create(self, name, version, loader="vanilla", loader_version="", on_created=None):
         self.store.require_minecraft()
         valid_id(version)
         if loader not in ("vanilla", "fabric", "quilt", "forge", "neoforge"):
@@ -174,7 +174,10 @@ class GameManager:
         name = (name or version).strip()[:80]
         instance_id = "instance-" + uuid.uuid4().hex[:10]
         directory = self.store.instance_dir(instance_id)
-        (directory / "game").mkdir(parents=True)
+        directory.mkdir(parents=True)
+        if on_created:
+            on_created(instance_id, directory)
+        (directory / "game").mkdir()
         data = {"id": instance_id, "name": name, "game_version": version, "version": version,
                 "loader": loader, "loader_version": loader_version, "ready": False,
                 "created": time.time(), "last_played": 0, "play_seconds": 0,
@@ -302,7 +305,7 @@ class GameManager:
                     results.append(dict(native, native=True, exclude=lib.get("extract", {}).get("exclude", [])))
         return results
 
-    def download_batch(self, jobs, task, label, start=15, end=85):
+    def download_batch(self, jobs, task, label, start=15, end=85, fallback=None):
         if not jobs:
             return
         task.update(label + " · 0 / " + str(len(jobs)), start)
@@ -312,7 +315,19 @@ class GameManager:
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
             def download(index, job):
                 task.check()
-                self.net.download(job["url"], job["target"], sha1=job.get("sha1"), sha512=job.get("sha512"), task=progress.file(index), size=job.get("size"))
+                last = None
+                for url in job.get("urls") or [job["url"]]:
+                    try:
+                        self.net.download(url, job["target"], sha1=job.get("sha1"), sha512=job.get("sha512"), task=progress.file(index), size=job.get("size"))
+                        return
+                    except Cancelled:
+                        raise
+                    except Exception as exc:
+                        last = exc
+                        task.check()
+                if fallback and fallback(job, progress.file(index)):
+                    return
+                raise last
             futures = [pool.submit(download, index, job) for index, job in enumerate(jobs)]
             try:
                 for count, future in enumerate(concurrent.futures.as_completed(futures), 1):
@@ -320,6 +335,7 @@ class GameManager:
                     with task.lock:
                         task.message = "{} · {} / {}".format(label, count, len(jobs))
             except Exception:
+                task.cancel.set()
                 for future in futures:
                     future.cancel()
                 raise

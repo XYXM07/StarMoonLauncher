@@ -18,7 +18,7 @@ EXCLUDED = {"__pycache__",".pytest_cache",".mypy_cache",".ruff_cache",".git","da
 
 def source_files():
     files = [ROOT/name for name in FILES]
-    files.extend(ROOT/name for name in ("LICENSE","LICENSE.md","LICENSE.txt","NOTICE","SECURITY.md") if (ROOT/name).is_file())
+    files.extend(ROOT/name for name in ("LICENSE","LICENSE.md","LICENSE.txt","NOTICE","SECURITY.md","AGENTS.md") if (ROOT/name).is_file())
     for name in DIRECTORIES:
         directory = ROOT/name
         if not directory.is_dir(): raise FileNotFoundError(str(directory))

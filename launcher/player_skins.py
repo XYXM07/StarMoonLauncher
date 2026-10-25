@@ -3,13 +3,14 @@ import base64
 import hashlib
 import json
 import re
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
 from pathlib import Path
 
-from .core import LauncherError, SSL_CONTEXT, USER_AGENT
+from .core import LauncherError, SSL_CONTEXT, USER_AGENT, atomic_json, read_json, safe_path
 
 
 class OfficialRedirectsOnly(urllib.request.HTTPRedirectHandler):
@@ -104,6 +105,40 @@ class PlayerSkins:
         path = folder/(hashlib.sha256(payload).hexdigest()+".png")
         self.write_png(path,payload)
         return {"name":name,"uuid":identifier,"model":model,"path":str(path)}
+
+    def account_skin(self, account):
+        identifier = str(account.get("id", "")).replace("-", "").lower()
+        if account.get("type") != "microsoft" or not re.fullmatch(r"[a-f0-9]{32}", identifier):
+            raise LauncherError("请输入有效的 Java 正版玩家名或 UUID")
+        folder = self.cache / identifier
+        receipt = folder / "avatar.json"
+        url = self.texture_url(account["skin_url"]) if account.get("skin_url") else ""
+        cached = None
+        try:
+            data = read_json(receipt, {})
+            name = str(data.get("file", ""))
+            if re.fullmatch(r"[a-f0-9]{64}\.png", name):
+                path = safe_path(folder, name)
+                if path.is_file() and path.stat().st_size <= 1024 * 1024:
+                    cached = str(path)
+                    if data.get("url", "") == url and time.time() - float(data.get("time", 0)) < 3600:
+                        return cached
+        except (OSError, ValueError, TypeError):
+            pass
+        try:
+            if url:
+                payload, _ = self.clean_png(self.get(url, 1024 * 1024))
+                folder.mkdir(parents=True, exist_ok=True)
+                path = folder / (hashlib.sha256(payload).hexdigest() + ".png")
+                self.write_png(path, payload)
+            else:
+                path = Path(self.download(identifier)["path"])
+            atomic_json(receipt, {"file": path.name, "url": url, "time": time.time()})
+            return str(path)
+        except (LauncherError, OSError):
+            if cached:
+                return cached
+            raise
 
     @staticmethod
     def write_png(path,payload):

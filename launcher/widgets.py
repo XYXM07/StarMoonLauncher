@@ -212,6 +212,7 @@ class NavigationSwitch(QWidget):
         super().__init__(parent)
         self.setObjectName("top-switch")
         self.setFixedHeight(44)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.group = QButtonGroup(self)
         self.group.setExclusive(True)
         self.buttons,self.current = {},""
@@ -228,7 +229,7 @@ class NavigationSwitch(QWidget):
             button.clicked.connect(lambda checked=False,k=key:self._clicked(k))
             self.group.addButton(button)
             self.buttons[key] = button
-            layout.addWidget(button)
+            layout.addWidget(button, 1)
 
     def _clicked(self,key):
         if key != self.current:
@@ -244,10 +245,14 @@ class NavigationSwitch(QWidget):
         for name,button in self.buttons.items():
             button.primary = name == key
             button.update()
-        target = QRectF(self.buttons[key].geometry()).adjusted(0,1,0,-1)
+        self.layout().activate()
+        self._select_pill(animated)
+
+    def _select_pill(self, animated, duration=280):
+        target = QRectF(self.buttons[self.current].geometry()).adjusted(0,1,0,-1)
         self.motion.stop()
         if animated and not self.pill.isEmpty() and QApplication.instance().property("animations") is not False:
-            self.motion.setDuration(280)
+            self.motion.setDuration(max(1, duration))
             self.motion.setEasingCurve(QEasingCurve.OutCubic)
             self.motion.setStartValue(self.pill)
             self.motion.setEndValue(target)
@@ -259,7 +264,16 @@ class NavigationSwitch(QWidget):
         super().resizeEvent(event)
         if self.current:
             self.layout().activate()
-            self.select(self.current,False)
+            running = self.motion.state() == QAbstractAnimation.Running
+            remaining = self.motion.duration() - self.motion.currentTime()
+            # Filtering may show/hide a scrollbar mid-transition. Keep the pill's
+            # relative position on the resized track instead of snapping to its end.
+            old_width = event.oldSize().width() - 8
+            if running and old_width > 0:
+                scale = max(1, self.width() - 8) / old_width
+                self.pill = QRectF(4 + (self.pill.x() - 4) * scale, self.pill.y(),
+                                   self.pill.width() * scale, self.pill.height())
+            self._select_pill(running, remaining)
 
     def paintEvent(self,event):
         p = QPainter(self)

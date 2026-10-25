@@ -8,7 +8,12 @@ import uuid
 import zipfile
 from pathlib import Path
 
-from .core import LauncherError, atomic_json, extract_zip, read_json, request_json, safe_path, valid_id
+from .core import Cancelled, LauncherError, atomic_json, extract_zip, read_json, request_json, safe_path, valid_id
+from .providers import ProviderHub, sources
+from .github_source import GitHubSource
+from .ai_downloads import AIDownloads
+from .pack_session import pack_session
+from .mod_previews import ModPreviews
 
 MODRINTH = "https://api.modrinth.com/v2"
 CURSEFORGE = "https://api.curseforge.com/v1"
@@ -19,6 +24,10 @@ class ContentManager:
         self.store = store
         self.net = network
         self.game = game
+        self.providers = ProviderHub()
+        self.github = GitHubSource(self)
+        self.ai_downloads = AIDownloads(self)
+        self.previews = ModPreviews(self)
 
     def curse(self, path):
         key = self.store.config()["curseforge_key"]
@@ -29,6 +38,23 @@ class ContentManager:
     def search(self, query="", kind="mod", version="", loader="", offset=0, provider="modrinth", sort="downloads"):
         if kind not in ("mod", "modpack", "resourcepack", "shader"):
             raise LauncherError("不支持的内容类型")
+        if provider not in dict(sources(kind)):
+            raise LauncherError("此内容平台不支持所选内容类型")
+        if provider == "github":
+            from .github_source import repository
+            if query.strip():
+                try:
+                    repository(query)
+                except LauncherError:
+                    # Malformed URLs remain errors, never prompts to a model.
+                    if "://" in query or "/" in query or "\\" in query:
+                        raise
+                    if not self.store.config().get("ai_github_search"):
+                        raise LauncherError("名称搜索需在设置 → 智能排查中开启 AI 搜索 GitHub 模组；也可直接输入仓库地址")
+                    return self.ai_downloads.search(query, offset)
+            return self.github.search(query, offset)
+        if provider in ("atlauncher", "ftb", "mcmod"):
+            return self.providers.search(provider, query, kind, offset, version, loader)
         if provider == "curseforge":
             params = {"gameId": 432, "classId": {"mod": 6, "modpack": 4471, "resourcepack": 12, "shader": 6552}[kind],
                       "searchFilter": query, "index": offset, "pageSize": 18, "sortField": 6, "sortOrder": "desc"}
@@ -51,6 +77,12 @@ class ContentManager:
         return self.net.json(MODRINTH + "/search?" + urllib.parse.urlencode(params))
 
     def versions(self, project_id, instance_id="", kind="mod", provider="modrinth"):
+        if provider not in dict(sources(kind)) or provider == "mcmod":
+            raise LauncherError("此内容平台不提供自动安装")
+        if provider == "github":
+            return self.github.versions(project_id)
+        if provider in ("atlauncher", "ftb"):
+            return self.providers.versions(provider, str(project_id))
         valid_id(str(project_id))
         instance = self.store.instance(instance_id) if instance_id else None
         if provider == "curseforge":
@@ -71,11 +103,24 @@ class ContentManager:
         suffix = "?" + urllib.parse.urlencode(params) if params else ""
         return self.net.json(MODRINTH + "/project/" + str(project_id) + "/version" + suffix)
 
-    def install_project(self, project_id, version_id, instance_id, kind, provider, task):
+    def install_project(self, project_id, version_id, instance_id, kind, provider, task, allow_unknown=False):
+        if kind == "modpack":
+            with pack_session(self, task):
+                return self._install_project(project_id, version_id, instance_id, kind, provider, task, allow_unknown)
+        return self._install_project(project_id, version_id, instance_id, kind, provider, task, allow_unknown)
+
+    def _install_project(self, project_id, version_id, instance_id, kind, provider, task, allow_unknown=False):
+        if provider not in dict(sources(kind)) or provider == "mcmod":
+            raise LauncherError("此内容平台不提供自动安装")
+        if provider == "github":
+            return self.github.install(project_id, version_id, instance_id, task, allow_unknown)
+        if provider in ("atlauncher", "ftb"):
+            from .pack_install import install_pack
+            return install_pack(self, provider, str(project_id), str(version_id), task)
         if provider == "curseforge":
             file = self.curse("/mods/{}/files/{}".format(valid_id(str(project_id)), valid_id(str(version_id))))["data"]
             if kind == "modpack":
-                archive = self.store.root / "cache" / ("cf-" + str(file["id"]) + ".zip")
+                archive = task._pack_session.archive_path("cf-" + str(file["id"]) + ".zip")
                 self._cf_download(file, archive, task)
                 return self.import_pack(archive, task)
             self._check_mod_instance(instance_id, kind)
@@ -91,7 +136,7 @@ class ContentManager:
             file = next((f for f in version["files"] if f["filename"].endswith(".mrpack")), None)
             if not file:
                 raise LauncherError("此版本没有可用的 mrpack 文件")
-            target = self.store.root / "cache" / (valid_id(version_id) + ".mrpack")
+            target = task._pack_session.archive_path(valid_id(version_id) + ".mrpack")
             self.net.download(file["url"], target, sha512=file.get("hashes", {}).get("sha512"), sha1=file.get("hashes", {}).get("sha1"), task=task, size=file.get("size"))
             return self.import_pack(target, task)
         self._check_mod_instance(instance_id, kind)
@@ -154,14 +199,27 @@ class ContentManager:
         self._record(instance_id, {"provider": "modrinth", "project_id": version["project_id"], "version_id": version["id"],
                                   "filename": file["filename"], "name": version["name"], "kind": kind, "installed": time.time()})
 
-    def _cf_download(self, file, target, task):
+    def _cf_download(self, file, target, task, pack_instance=None):
         url = file.get("downloadUrl")
         if not url:
             raise LauncherError("作者禁止第三方自动下载，请到 CurseForge 项目页面手动下载并导入：" + file["fileName"])
         sha1 = next((h["value"] for h in file.get("hashes", []) if h["algo"] == 1), None)
-        self.net.download(url, target, sha1=sha1, task=task, size=file.get("fileLength"))
+        try:
+            self.net.download(url, target, sha1=sha1, task=task, size=file.get("fileLength"))
+        except Cancelled:
+            raise
+        except Exception:
+            task.check()
+            if not pack_instance or not self.ai_downloads.recover(
+                    {"path": "mods/" + file["fileName"], "target": target, "sha1": sha1, "size": file.get("fileLength")},
+                    self._pack_context(pack_instance), task):
+                raise
 
-    def _cf_install(self, project_id, file, instance_id, kind, task, seen):
+    def _pack_context(self, instance_id):
+        instance = self.store.instance(instance_id)
+        return {key: instance.get(key, "") for key in ("game_version", "loader", "loader_version")}
+
+    def _cf_install(self, project_id, file, instance_id, kind, task, seen, pack=False):
         if file["id"] in seen:
             return
         seen.add(file["id"])
@@ -172,12 +230,12 @@ class ContentManager:
             if not choices:
                 raise LauncherError("找不到必需依赖：" + str(dep["modId"]))
             child = self.curse("/mods/{}/files/{}".format(dep["modId"], choices[0]["id"]))["data"]
-            self._cf_install(str(dep["modId"]), child, instance_id, "mod", task, seen)
+            self._cf_install(str(dep["modId"]), child, instance_id, "mod", task, seen, pack=pack)
         filename = file["fileName"]
         if Path(filename).name != filename:
             raise LauncherError("内容文件名不合法")
         task.update("安装内容 · " + filename, 50)
-        self._cf_download(file, safe_path(self._folder(instance_id, kind), filename), task)
+        self._cf_download(file, safe_path(self._folder(instance_id, kind), filename), task, pack_instance=instance_id if pack else None)
         self._record(instance_id, {"provider": "curseforge", "project_id": str(project_id), "version_id": str(file["id"]),
                                   "filename": filename, "name": file["displayName"], "kind": kind, "installed": time.time()})
 
@@ -189,7 +247,10 @@ class ContentManager:
                 if path.is_file() and path.name.endswith((".jar", ".zip", ".disabled")):
                     original = path.name[:-9] if path.name.endswith(".disabled") else path.name
                     record = next((r for r in records if r["filename"] == original), {})
-                    result.append(dict(record, filename=path.name, kind=kind, size=path.stat().st_size, enabled=not path.name.endswith(".disabled")))
+                    item = dict(record, filename=path.name, kind=kind, size=path.stat().st_size, enabled=not path.name.endswith(".disabled"))
+                    if kind == "mod":
+                        item.update(self.previews.local(path))
+                    result.append(item)
         return result
 
     def toggle(self, instance_id, filename, kind, remove=False):
@@ -210,6 +271,28 @@ class ContentManager:
             path.rename(target)
 
     def import_pack(self, archive, task):
+        with pack_session(self, task) as session:
+            try:
+                return self._import_pack(archive, task, session)
+            except zipfile.BadZipFile:
+                raise LauncherError("整合包文件损坏或不是有效的 ZIP 文件") from None
+
+    def import_file(self, path, task):
+        with pack_session(self, task) as session:
+            source = Path(path)
+            if source.suffix.lower() not in (".mrpack", ".zip") or not source.is_file():
+                raise LauncherError("请选择有效的 .mrpack 或 .zip 整合包文件")
+            if source.stat().st_size > 8 * 1024 ** 3:
+                raise LauncherError("整合包文件超过大小限制")
+            cached = session.archive_path("import" + source.suffix.lower())
+            with source.open("rb") as reader, cached.open("wb") as writer:
+                for chunk in iter(lambda: reader.read(1024 * 1024), b""):
+                    task.check()
+                    writer.write(chunk)
+            task.check()
+            return self.import_pack(cached, task)
+
+    def _import_pack(self, archive, task, session):
         with zipfile.ZipFile(archive) as zf:
             entries = zf.infolist()
             if len(entries) > 100000 or sum(entry.file_size for entry in entries) > 8 * 1024 ** 3:
@@ -226,7 +309,7 @@ class ContentManager:
                 deps = index["dependencies"]
                 loader_key = next((key for key in ("fabric-loader", "quilt-loader", "forge", "neoforge") if key in deps), None)
                 loader = {"fabric-loader": "fabric", "quilt-loader": "quilt"}.get(loader_key, loader_key or "vanilla")
-                instance = self.game.create(index["name"], deps["minecraft"], loader, deps.get(loader_key, ""))
+                instance = session.create(index["name"], deps["minecraft"], loader, deps.get(loader_key, ""))
                 self.store.update_instance(instance["id"], {"pack": index["name"], "pack_format": "mrpack", "pack_install_pending": True})
                 self.game.install(instance["id"], task)
                 self.store.update_instance(instance["id"], {"ready": False})
@@ -240,9 +323,10 @@ class ContentManager:
                     hashes = item.get("hashes", {})
                     if not hashes.get("sha1") and not hashes.get("sha512"):
                         raise LauncherError("整合包文件缺少校验哈希")
-                    jobs.append({"url": item["downloads"][0], "target": safe_path(directory, item["path"]),
+                    jobs.append({"url": item["downloads"][0], "urls": item["downloads"], "path": item["path"], "target": safe_path(directory, item["path"]),
                                  "sha1": hashes.get("sha1"), "sha512": hashes.get("sha512"), "size": item.get("fileSize")})
-                self.game.download_batch(jobs, task, "下载整合包文件", 20, 90)
+                self.game.download_batch(jobs, task, "下载整合包文件", 20, 90,
+                    fallback=lambda job, transfer: self.ai_downloads.recover(job, self._pack_context(instance["id"]), transfer))
                 extract_zip(archive, directory, prefix="overrides/", task=task)
                 extract_zip(archive, directory, prefix="client-overrides/", task=task)
             elif "manifest.json" in names:
@@ -254,19 +338,19 @@ class ContentManager:
                 loaders = index.get("minecraft", {}).get("modLoaders", [])
                 loader_id = next((l["id"] for l in loaders if l.get("primary")), loaders[0]["id"] if loaders else "")
                 loader, _, loader_version = loader_id.partition("-")
-                instance = self.game.create(index.get("name", "CurseForge 整合包"), index["minecraft"]["version"], loader or "vanilla", loader_version)
+                instance = session.create(index.get("name", "CurseForge 整合包"), index["minecraft"]["version"], loader or "vanilla", loader_version)
                 self.store.update_instance(instance["id"], {"pack_install_pending": True})
                 self.game.install(instance["id"], task)
                 self.store.update_instance(instance["id"], {"ready": False, "pack": index.get("name")})
                 for i, item in enumerate(index.get("files", [])):
                     task.update("下载整合包模组 · {} / {}".format(i + 1, len(index["files"])), 50)
                     file = self.curse("/mods/{}/files/{}".format(item["projectID"], item["fileID"]))["data"]
-                    self._cf_install(str(item["projectID"]), file, instance["id"], "mod", task, set())
+                    self._cf_install(str(item["projectID"]), file, instance["id"], "mod", task, set(), pack=True)
                 prefix = index.get("overrides", "overrides").rstrip("/") + "/"
                 extract_zip(archive, self.store.instance_dir(instance["id"]) / "game", prefix=prefix, task=task)
             elif "blockcraft.json" in names:
                 index = metadata("blockcraft.json")
-                instance = self.game.create(index["name"], index["game_version"], index["loader"], index.get("loader_version", ""))
+                instance = session.create(index["name"], index["game_version"], index["loader"], index.get("loader_version", ""))
                 self.store.update_instance(instance["id"], {"pack_install_pending": True})
                 self.game.install(instance["id"], task)
                 self.store.update_instance(instance["id"], {"ready": False})
@@ -297,6 +381,8 @@ class ContentManager:
         updates = []
         records = read_json(self.store.instance_dir(instance_id) / "content.json", [])
         for item in records:
+            if item["provider"] == "github":
+                continue  # Assets need an explicit choice and JAR inspection; never guess the matching variant.
             if not safe_path(self._folder(instance_id, item["kind"]), item["filename"]).is_file():
                 continue
             versions = self.versions(item["project_id"], instance_id, item["kind"], item["provider"])

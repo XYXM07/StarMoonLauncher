@@ -119,13 +119,15 @@ class Network:
                 error = exc
         raise LauncherError("无法获取在线数据：{} ({})".format(urllib.parse.urlparse(url).hostname, type(error).__name__))
 
-    def download(self, url, target, sha1=None, sha512=None, task=None, size=None):
+    def download(self, url, target, sha1=None, sha512=None, task=None, size=None, sha256=None, md5=None):
         target = Path(target)
         if task:
             from .progress import DownloadProgress, FileProgress
             if not isinstance(task, FileProgress):
                 task = DownloadProgress(task, [{"size": size}], target.name, task.progress, 98).file(0)
-        algorithm, expected = ("sha512", sha512) if sha512 else ("sha1", sha1)
+        algorithm, expected = next(((name, value) for name, value in
+                                    (("sha512", sha512), ("sha256", sha256), ("sha1", sha1), ("md5", md5))
+                                    if value), ("sha1", None))
         if target.is_file():
             if expected:
                 digest = hashlib.new(algorithm)
@@ -204,9 +206,50 @@ class Task:
         self.cancel = threading.Event()
         self.lock = threading.RLock()
 
+        self.interaction = None
+        self._interaction_event = threading.Event()
+        self._interaction_answer = None
+        self.pack_install = None
+        self.recovery_results = []
+
     def check(self):
         if self.cancel.is_set():
             raise Cancelled("任务已取消")
+
+    def request_choice(self, kind, details, options):
+        """Pause this worker for an explicit UI response; cancellation always wakes it."""
+        self.check()
+        with self.lock:
+            if self.interaction is not None:
+                raise LauncherError("此任务已有待处理的选择")
+            self._interaction_event.clear()
+            self._interaction_answer = None
+            self.interaction = {"id": uuid.uuid4().hex, "kind": kind, "details": copy.deepcopy(details),
+                                "options": copy.deepcopy(options)}
+        try:
+            while not self._interaction_event.wait(.2):
+                self.check()
+            self.check()
+            with self.lock:
+                return self._interaction_answer
+        finally:
+            with self.lock:
+                self.interaction = None
+                self._interaction_answer = None
+                self._interaction_event.clear()
+
+    def respond(self, request_id, choice):
+        with self.lock:
+            pending = self.interaction
+            if (not pending or pending["id"] != request_id or self._interaction_answer is not None or
+                    self.cancel.is_set() or self.finished):
+                raise LauncherError("补下载请求已失效，请等待最新提示")
+            if not isinstance(choice, str) or choice not in {item["id"] for item in pending["options"]} | {"cancel"}:
+                raise LauncherError("请选择列表中的版本")
+            self._interaction_answer = choice
+            if choice == "cancel":
+                self.cancel.set()
+            self._interaction_event.set()
 
     def update(self, message, progress=None):
         self.check()
@@ -229,6 +272,12 @@ class Task:
             self._transfers.append((now, size))
             self._trim_transfers(now)
 
+    def record_recovery(self, filename, success, reason="", version=""):
+        with self.lock:
+            self.recovery_results.append({"id": uuid.uuid4().hex[:12], "filename": str(filename)[:200],
+                "success": bool(success), "reason": str(reason)[:240], "version": str(version)[:100]})
+            self.recovery_results = self.recovery_results[-100:]
+
     def _trim_transfers(self, now):
         while self._transfers and self._transfers[0][0] < now - 2:
             self._transfers.popleft()
@@ -243,6 +292,11 @@ class Task:
             result["speed"] = (sum(size for _, size in self._transfers) / max(.5, now-self._transfers[0][0])
                                if self.status == "running" and self._transfers else 0)
             result["download"] = dict(self.download) if self.download else None
+            result["interaction"] = copy.deepcopy(self.interaction) if not self.cancel.is_set() and self._interaction_answer is None else None
+            result["pack_install"] = copy.deepcopy(self.pack_install)
+            result["recovery_results"] = copy.deepcopy(self.recovery_results)
+            if result["interaction"]:
+                result["message"] = "等待确认 AI 补下载" if self.interaction["kind"] == "ai_recovery_confirm" else "等待选择补下载版本"
             return result
 
 
@@ -296,6 +350,13 @@ class TaskManager:
                 raise LauncherError("任务不存在")
             self.tasks[task_id].cancel.set()
 
+    def respond(self, task_id, request_id, choice):
+        with self.lock:
+            task = self.tasks.get(task_id)
+        if not task:
+            raise LauncherError("任务不存在")
+        task.respond(request_id, choice)
+
     def dismiss(self, task_id=None):
         with self.lock:
             if task_id is not None and task_id not in self.tasks:
@@ -331,9 +392,14 @@ class Store:
                          "minecraft_folders": [], "library_root": "", "hidden_external_instances": [],
                          "launcher_width": 900, "launcher_height": 600, "compact_window_default": True,
                          "language": "zh_CN", "color_scheme": "starmoon", "ai_base_url": "", "ai_model": "",
-                         "ai_crash_analysis": True, "ai_auto_preflight": False, "auto_check_updates": True}
+                         "ai_crash_analysis": True, "ai_auto_preflight": False, "auto_check_updates": True,
+                         "ai_github_search": False, "ai_pack_download_fallback": True,
+                         "ai_pack_download_default_on": True}
         saved = read_json(self.path, {})
         self.data = dict(self.defaults, **saved)
+        # Enable the new default once on upgrade; later explicit opt-outs persist.
+        if not saved.get("ai_pack_download_default_on"):
+            self.data.update(ai_pack_download_fallback=True, ai_pack_download_default_on=True)
         if "background_mode" not in saved and saved.get("background_path"):
             self.data["background_mode"] = "custom"
         if "compact_window_default" not in saved and (saved.get("launcher_width", 1100), saved.get("launcher_height", 720)) == (1100, 720):

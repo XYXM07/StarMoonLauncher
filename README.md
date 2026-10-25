@@ -2,9 +2,9 @@
 
 [English](README.en.md)
 
-由 **星月晓梦** 制作的 Windows Minecraft Java 版第三方启动器。使用 Python / PySide6 构建，提供原生无边框液态玻璃界面，可打包为单个 EXE。当前版本 **0.7.6**。
+由 **星月晓梦** 制作的 Windows Minecraft Java 版第三方启动器。使用 Python / PySide6 构建，提供原生无边框液态玻璃界面，可打包为单个 EXE。当前版本 **0.7.7**。
 
-[下载 Windows 64 位单文件版](https://github.com/XYXM07/StarMoonLauncher/releases/download/v0.7.6/StarMoonLauncher-0.7.6-windows-x64.exe) · [GitHub Releases](https://github.com/XYXM07/StarMoonLauncher/releases)
+[下载 Windows 64 位单文件版](https://github.com/XYXM07/StarMoonLauncher/releases/download/v0.7.7/StarMoonLauncher-0.7.7-windows-x64.exe) · [GitHub Releases](https://github.com/XYXM07/StarMoonLauncher/releases)
 
 下载 EXE 后直接双击运行，无需安装 Python 或自行编译。
 
@@ -18,17 +18,23 @@
 - 扫描本机或指定目录下的 `.minecraft`，勾选后批量添加；扫描可随时停止。
 - 官方源 / BMCLAPI 镜像、分段下载、任务进度和速度显示。
 - Modrinth / CurseForge 内容检索、模组与整合包下载；CurseForge 需要自行配置 API Key。
+- ATLauncher / FTB 整合包浏览与安装、MC 百科中文检索及原站入口、GitHub Releases 模组安装。[内容来源说明](docs/CONTENT_SOURCES.md)
+- 可选的 AI 模组名称搜索，以及默认开启的整合包模组补下载。优先从 MC百科相关链接定位项目；补下载前先确认，再由玩家选择候选版本。两个独立开关位于「设置 → 智能排查」，共用已配置的模型接口。
+- 本地整合包可直接拖入主窗口安装，支持多文件队列。安装失败弹窗说明原因，并清理本次新建实例和临时文件；保留原始整合包、已有游戏与存档。
 - 七种界面配色、动效、可调玻璃效果、自定义壁纸与六张预设壁纸。
 - 简体中文 / English 切换，位于「设置 → 外观 → 语言 / Language」，即时生效并自动保存。
 - 从 GitHub Releases 检查和下载正式更新，校验后原位替换 EXE 并重启；游戏或任务运行时暂缓安装。[更新说明](docs/UPDATING.md)
 - 离线皮肤自定义、公开正版玩家皮肤预览与 PNG 下载。
+- 正版账号自动显示皮肤头像；模组管理显示包内图标，缺少时尝试下载平台封面，并展示模组简介。
+- 模组管理支持「全部 / 已启用 / 已禁用」分类，可与搜索组合使用；大量模组按滚动位置创建可见卡片，避免切换时重建整页；无图片时显示铺满区域的圆角占位图。
+- 模组管理提供「查看网站」，支持元数据中的主页、GitHub / Modrinth / CurseForge 页面和 MC百科；缺少百科直链时可按模组名称搜索。
 - 自动内存分配、可选模型崩溃分析和启动前模组排查。
 
 ![预设壁纸](docs/images/wallpaper-presets.png)
 
 ## 使用
 
-运行 `StarMoonLauncher-0.7.6-windows-x64.exe`。首次打开不会自动创建游戏目录；在「启动 → 版本选择」中选择「创建 .minecraft 文件夹」或「添加 .minecraft 文件夹」。下载游戏后选择版本与账号，再启动。
+运行 `StarMoonLauncher-0.7.7-windows-x64.exe`。首次打开不会自动创建游戏目录；在「启动 → 版本选择」中选择「创建 .minecraft 文件夹」或「添加 .minecraft 文件夹」。下载游戏后选择版本与账号，再启动。
 
 在版本选择左侧点击「扫描 .minecraft 文件夹」：默认递归扫描本机硬盘和可移动磁盘，也可指定扫描目录。扫描结果显示路径、版本数和已添加状态，勾选后批量添加；停止扫描会保留已找到的结果。无权限目录和目录链接会跳过，游戏文件继续保留在原位置。
 
@@ -51,7 +57,7 @@ py -3.11 -m venv .venv
 构建单文件 EXE：
 
 ```powershell
-.\.venv\Scripts\python.exe build.py --output-name StarMoonLauncher-0.7.6-windows-x64
+.\.venv\Scripts\python.exe build.py --output-name StarMoonLauncher-0.7.7-windows-x64
 ```
 
 运行回归测试：

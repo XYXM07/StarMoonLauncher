@@ -115,3 +115,33 @@ class PlayerSkinTests(unittest.TestCase):
                 opener.open.side_effect = urllib.error.HTTPError("https://api.mojang.com/a",code,"fixture",{},None)
                 with self.assertRaises(LauncherError): self.app.player_skins.get("https://api.mojang.com/a",10)
         with self.assertRaises(LauncherError): OfficialRedirectsOnly().redirect_request(None,None,302,"",{},"https://example.com")
+
+    def test_signed_in_account_uses_active_texture_and_caches_it(self):
+        account = {"id": self.uuid, "type": "microsoft", "skin_url": self.texture, "name": "FixturePlayer"}
+        with patch.object(self.app.player_skins, "get", side_effect=self.get):
+            first = self.app.player_skins.account_skin(account)
+            second = self.app.player_skins.account_skin(account)
+        self.assertEqual(first, second)
+        self.assertEqual(self.calls, [self.texture.replace("http:", "https:")])
+        self.assertEqual(QImage(first).textKeys(), [])
+
+    def test_signed_in_account_without_texture_uses_public_uuid_profile_and_stale_cache_offline(self):
+        account = {"id": self.uuid, "type": "microsoft", "name": "FixturePlayer"}
+        with patch.object(self.app.player_skins, "get", side_effect=self.get):
+            path = self.app.player_skins.account_skin(account)
+        self.assertIn("sessionserver", self.calls[0])
+        receipt = self.app.player_skins.cache / self.uuid / "avatar.json"
+        data = json.loads(receipt.read_text("utf-8")); data["time"] = 0
+        receipt.write_text(json.dumps(data), encoding="utf-8")
+        with patch.object(self.app.player_skins, "get", side_effect=LauncherError("offline")):
+            self.assertEqual(self.app.player_skins.account_skin(account), path)
+
+    def test_login_profile_texture_is_cosmetic_and_does_not_expose_tokens(self):
+        for skins in ([{"state": "ACTIVE", "url": self.texture}], [{"state": "ACTIVE", "url": "https://evil.invalid/skin.png"}],
+                      [{"state": "ACTIVE", "url": "https://textures.minecraft.net:invalid/texture/a"}], None):
+            responses = [{"Token": "xbox"}, {"Token": "xsts", "DisplayClaims": {"xui": [{"uhs": "hash"}]}},
+                         {"access_token": "PRIVATE_TOKEN"}, {"items": ["java"]}, {"id": self.uuid, "name": "FixturePlayer", "skins": skins}]
+            with patch.object(self.app.accounts, "_auth_request", side_effect=responses), patch.object(self.app.accounts, "_credentials"):
+                account = self.app.accounts._exchange({"access_token": "PRIVATE_TOKEN"}, "client")
+            self.assertNotIn("PRIVATE_TOKEN", json.dumps(account))
+            self.assertEqual(bool(account.get("skin_url")), skins == [{"state": "ACTIVE", "url": self.texture}])

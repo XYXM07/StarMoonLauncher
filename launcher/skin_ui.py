@@ -1,7 +1,7 @@
 """Pixel-exact skin preview and avatar, rendered by Qt without a web view."""
 from PySide6.QtCore import QRectF, Qt
 from PySide6.QtGui import QColor, QImage, QPainter, QPixmap
-from PySide6.QtWidgets import QWidget
+from PySide6.QtWidgets import QLabel, QWidget
 from .material import paint_glass
 from .i18n import tr
 from .themes import color
@@ -13,7 +13,7 @@ def has_head_overlay(image):
 
 
 def skin_avatar(path, size=56):
-    image = QImage(str(path))
+    image = path if isinstance(path, QImage) else QImage(str(path))
     if image.isNull(): return QPixmap()
     pixmap = QPixmap(size,size)
     pixmap.fill(Qt.transparent)
@@ -22,6 +22,22 @@ def skin_avatar(path, size=56):
     if has_head_overlay(image): painter.drawImage(QRectF(0,0,size,size),image,QRectF(40,8,8,8))
     painter.end()
     return pixmap
+
+
+class AccountAvatar(QLabel):
+    def __init__(self, icon, size=56, parent=None):
+        super().__init__(parent)
+        self.avatar_size, self.fallback_icon = size, icon
+        self.setAlignment(Qt.AlignCenter)
+        self.reset()
+
+    def reset(self):
+        self.setProperty("imageSourceKey", None)
+        self.setPixmap(self.fallback_icon.pixmap(self.avatar_size, self.avatar_size))
+
+    def set_image(self, image):
+        if not image.isNull():
+            self.setPixmap(skin_avatar(image, self.avatar_size))
 
 
 class SkinPreview(QWidget):

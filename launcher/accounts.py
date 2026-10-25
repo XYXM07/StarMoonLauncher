@@ -163,6 +163,15 @@ class Accounts:
             raise LauncherError("该微软账号没有可用的 Minecraft Java 版授权")
         profile = self._auth_request("Java 版玩家档案", "https://api.minecraftservices.com/minecraft/profile", headers=headers)
         account = {"id": profile["id"], "name": profile["name"], "type": "microsoft"}
+        from .player_skins import PlayerSkins
+        skins = profile.get("skins")
+        for skin in (skins[:16] if isinstance(skins, list) else []):
+            if isinstance(skin, dict) and skin.get("state") == "ACTIVE":
+                try:
+                    account["skin_url"] = PlayerSkins.texture_url(skin.get("url"))
+                except (LauncherError, ValueError, TypeError):
+                    pass  # A missing cosmetic texture must not prevent sign-in.
+                break
         credentials = {"access_token": minecraft["access_token"],
             "expires": time.time() + minecraft.get("expires_in", 86400) - 120,
             "client_id": client_id, "xuid": xsts["DisplayClaims"]["xui"][0].get("xid", "")}

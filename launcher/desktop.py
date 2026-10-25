@@ -28,13 +28,15 @@ from .progress_ui import GlassProgress
 from .slider_ui import GlassSlider
 from .themes import SCHEMES, PalettePreview, apply as apply_theme, palette as theme_palette, color as theme_color
 from .combobox import GlassComboBox
-from .skin_ui import SkinPreview, skin_avatar
+from .skin_ui import AccountAvatar, SkinPreview
 from .memory import automatic_memory, effective_memory, physical_memory
 from .service import Application
 from .live_settings import LiveSettings
 from .appearance import BACKGROUND_PRESETS, preset_background, wallpaper_mode, wallpaper_path, wallpaper_label
 from .wallpaper_ui import WallpaperTile
 from .folder_scan import MinecraftFolderScanner
+from .local_list import VirtualCardList
+from .providers import sources as content_sources, https_url
 from . import __version__
 from .widgets import Button, ElidedLabel, GlassFrame, NavigationSwitch, PageHost, SmoothScroll, STYLE, SummaryLabel, VersionRow, WheelRouter, card, glass_style, label, remove_focus_rings
 
@@ -591,6 +593,14 @@ class LauncherWindow(LiveSettings, QMainWindow):
         self.pool.setMaxThreadCount(8)
         self.workers = {}
         self.dialogs = []
+        self.recovery_dialog = None
+        self.pack_failure_dialog = None
+        self.pack_failure_queue = []
+        self.notified_recovery = set()
+        self.setAcceptDrops(True)
+        from .pack_ui import PackDropFilter
+        self.pack_drop_filter = PackDropFilter(self)
+        QApplication.instance().installEventFilter(self.pack_drop_filter)
         self.notified = {t["id"] for t in self.data["tasks"]}
         self.notified_processes = set()
         self.notified_diagnostics = {t["id"] for t in self.data["tasks"]}
@@ -769,7 +779,7 @@ class LauncherWindow(LiveSettings, QMainWindow):
         types.addWidget(self.offline_mode)
         self.side_layout.addLayout(types)
         self.side_layout.addStretch(1)
-        avatar = QLabel()
+        avatar = AccountAvatar(self.windowIcon())
         self.avatar_label = avatar
         avatar.setPixmap(self.windowIcon().pixmap(56, 56))
         avatar.setAlignment(Qt.AlignCenter)
@@ -828,10 +838,7 @@ class LauncherWindow(LiveSettings, QMainWindow):
                 self.login_accounts.setCurrentIndex(index)
             self.login_accounts.blockSignals(False)
             chosen = next((a for a in accounts if a["id"] == self.login_accounts.currentData()), None)
-            avatar = QPixmap()
-            if chosen and chosen.get("skin_path"):
-                avatar = skin_avatar(self.service.skins.path(chosen))
-            self.avatar_label.setPixmap(avatar if not avatar.isNull() else self.windowIcon().pixmap(56,56))
+            self.bind_account_avatar(self.avatar_label, chosen)
             if not self.offline_name.hasFocus():
                 self.offline_name.setText(self.data["config"].get("offline_name", "") or (chosen or {}).get("name", ""))
             self.account_signature = signature
@@ -842,6 +849,15 @@ class LauncherWindow(LiveSettings, QMainWindow):
         selected = self.selected_instance()
         self.selected_label.setText(selected["name"] if selected else tr("未选择版本"))
         self.launch_button.setText(tr("再次启动") if selected and self.is_running(selected["id"]) else tr("启动游戏"))
+
+    def bind_account_avatar(self, widget, account):
+        widget.reset()
+        if not account:
+            return
+        if account.get("type") == "microsoft":
+            self.images.load_avatar(self.service.player_skins, account, widget)
+        elif account.get("skin_path"):
+            widget.set_image(QImage(str(self.service.skins.path(account))))
 
     def edit_current_skin(self):
         name = self.offline_name.text().strip()
@@ -1068,6 +1084,9 @@ class LauncherWindow(LiveSettings, QMainWindow):
     def refresh(self):
         try:
             self.data = self.service.state()
+            self.sync_recovery_dialog()
+            if self.background_mode and any(t["status"] == "failed" and t.get("pack_install") and t["id"] not in self.notified for t in self.data["tasks"]):
+                self.restore_window()
             for task in self.data["tasks"]:
                 result = task.get("result")
                 if task["status"] == "completed" and isinstance(result,dict) and result.get("diagnostic_report") and task["id"] not in self.notified_diagnostics:
@@ -1089,12 +1108,22 @@ class LauncherWindow(LiveSettings, QMainWindow):
             elif changed and self.page_id in ("library", "accounts"):
                 self.navigate(self.page_id, False)
             for task in self.data["tasks"]:
+                for result in task.get("recovery_results", []):
+                    key = (task["id"], result["id"])
+                    if key not in self.notified_recovery:
+                        self.notified_recovery.add(key)
+                        message = tr("AI 补下载成功，已通过校验：{}") if result["success"] else tr("AI 补下载失败：{}")
+                        self.toast(message.format(result["filename"]), not result["success"])
                 if task["status"] in ("failed", "completed", "cancelled") and task["id"] not in self.notified:
                     self.notified.add(task["id"])
-                    if not isinstance(task.get("result"),dict) or not task["result"].get("diagnostic_report"):
+                    report = task.get("pack_install")
+                    if report and (task["status"] == "failed" or report.get("cleanup_errors")):
+                        self.pack_failure_queue.append(task)
+                    elif not (task["status"] == "completed" and any(item["success"] for item in task.get("recovery_results", []))) and (not isinstance(task.get("result"),dict) or not task["result"].get("diagnostic_report")):
                         self.toast(task["title"] + ("：" + task["error"] if task["status"] == "failed" else " · " + tr(STATUS[task["status"]])), task["status"] == "failed")
                     if self.page_id == "instance" and hasattr(self, "instance_panel"):
                         self.instance_panel.refresh_content()
+            self.sync_pack_failure_dialog()
             for process in self.data["processes"]:
                 key = (process.get("id",process["instance_id"]), process.get("started"))
                 if not process["running"] and process.get("exit_code") not in (None, 0) and not process.get("stop_requested") and key not in self.notified_processes:
@@ -1282,7 +1311,10 @@ class LauncherWindow(LiveSettings, QMainWindow):
             layout.addWidget(empty(tr("暂无账号"), "", Button(tr("添加离线账号"), self.add_offline, True)))
         for account in accounts:
             frame, box = card()
-            box.addLayout(row(label(account["name"], "section"), None, label(tr("离线账号") if account["type"] == "offline" else "Microsoft", "badge")))
+            avatar = AccountAvatar(self.windowIcon(), 44)
+            avatar.setFixedSize(44, 44)
+            self.bind_account_avatar(avatar, account)
+            box.addLayout(row(avatar, label(account["name"], "section"), None, label(tr("离线账号") if account["type"] == "offline" else "Microsoft", "badge")))
             selected = self.account() and account["id"] == self.account()["id"]
             account_id = account["id"]
             controls = [label(tr("✓ 当前使用") if selected else "", "muted"), None]
@@ -1316,6 +1348,32 @@ class LauncherWindow(LiveSettings, QMainWindow):
         self.tasks_layout.setSpacing(14)
         layout.addLayout(self.tasks_layout)
         self.update_tasks()
+
+    def sync_recovery_dialog(self):
+        if self.pack_failure_dialog:
+            return
+        pending = next((task for task in self.data["tasks"] if task["status"] == "running" and task.get("interaction")), None)
+        current = self.recovery_dialog
+        if current and (not pending or current.task_id != pending["id"] or current.request_id != pending["interaction"]["id"]):
+            current.expire()
+            self.recovery_dialog = None
+        if pending and self.recovery_dialog is None:
+            from .recovery_ui import RecoveryDialog
+            if self.background_mode:
+                self.restore_window()
+            dialog = RecoveryDialog(self, pending)
+            self.recovery_dialog = dialog
+            dialog.finished.connect(lambda _: setattr(self, "recovery_dialog", None) if self.recovery_dialog is dialog else None)
+            self.open_dialog(dialog)
+
+    def sync_pack_failure_dialog(self):
+        if self.pack_failure_dialog or self.recovery_dialog or not self.pack_failure_queue:
+            return
+        from .pack_ui import PackFailureDialog
+        dialog = PackFailureDialog(self, self.pack_failure_queue.pop(0))
+        self.pack_failure_dialog = dialog
+        dialog.finished.connect(lambda _: setattr(self, "pack_failure_dialog", None) if self.pack_failure_dialog is dialog else None)
+        self.open_dialog(dialog)
 
     def update_tasks(self):
         tasks = self.data["tasks"]
@@ -1400,11 +1458,14 @@ class LauncherWindow(LiveSettings, QMainWindow):
 
     def page_discover(self, layout):
         state = self.search_state
+        choices = content_sources(state["kind"])
+        if state["provider"] not in dict(choices):
+            state["provider"] = "modrinth"
         self.intro(layout, tr(KINDS[state["kind"]]))
         self.content_kind = combo(list(KINDS.items()), state["kind"], "content-kind")
         self.content_kind.setParent(self.page)
         self.content_kind.hide()
-        self.content_provider = combo([("modrinth", "Modrinth"), ("curseforge", "CurseForge")], state["provider"])
+        self.content_provider = combo([(key, tr(name)) for key, name in choices], state["provider"])
         self.content_provider.setFixedWidth(145)
         self.content_instance = combo([("", tr("不限版本 / 加载器"))] + [(i["id"], i["name"] + " · " + i["game_version"]) for i in self.data["instances"]], state["instance"])
         self.content_instance.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
@@ -1438,6 +1499,7 @@ class LauncherWindow(LiveSettings, QMainWindow):
             return
         state = self.search_state
         state.update(kind=self.content_kind.currentData(), provider=self.content_provider.currentData(), instance=self.content_instance.currentData(), query=self.content_query.text().strip())
+        self.content_query.setPlaceholderText(tr("输入模组名称或 GitHub 仓库地址") if state["provider"] == "github" else tr("搜索{kind}").format(kind=tr(KINDS[state["kind"]])))
         if reset:
             state["offset"] = 0
         self.content_instance.setEnabled(state["kind"] != "modpack")
@@ -1453,10 +1515,21 @@ class LauncherWindow(LiveSettings, QMainWindow):
             if self.page_id != "discover" or generation != self.project_search_generation:
                 return
             clear_layout(self.content_result_layout)
-            self.content_result_layout.addWidget(label(short_count(data["total_hits"]) + tr(" 个结果 · 按下载量排序"), "muted"))
+            if data.get("notice"):
+                self.content_result_layout.addWidget(label(tr(data["notice"]), "muted", True))
+            if data.get("external_search_url"):
+                self.content_result_layout.addWidget(Button(tr("在MC百科搜索"),
+                    lambda: self.open_content_url(data["external_search_url"])))
+            if data.get("order_label"):
+                summary = tr("{} 个结果 · {}").format(short_count(data["total_hits"]), tr(data["order_label"]))
+            else:
+                summary = short_count(data["total_hits"]) + tr(" 个结果 · 按下载量排序")
+            if not data.get("waiting_query") and not data.get("unavailable"):
+                self.content_result_layout.addWidget(label(summary, "muted"))
             for index, project in enumerate(data["hits"]):
                 frame, box = card()
                 frame.setObjectName("project-card")
+                frame.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
                 box.setContentsMargins(16, 16, 16, 16)
                 line = QHBoxLayout()
                 line.setSpacing(14)
@@ -1469,21 +1542,27 @@ class LauncherWindow(LiveSettings, QMainWindow):
                 text.addWidget(description)
                 line.addLayout(text, 1)
                 actions = QVBoxLayout()
-                actions.addWidget(label("↓ " + short_count(project["downloads"]), "muted"), 0, Qt.AlignRight)
+                if project.get("downloads") is not None:
+                    actions.addWidget(label("↓ " + short_count(project["downloads"]), "muted"), 0, Qt.AlignRight)
                 actions.addStretch()
-                button = Button(tr("选择版本"), lambda checked=False, item=project: self.project_versions(item), True)
+                button = Button(tr("查看百科") if project.get("action") == "article" else tr("选择版本"),
+                                lambda checked=False, item=project: self.project_versions(item), True)
                 button.setFixedWidth(138 if language() == "en_US" else 104)
                 actions.addWidget(button)
                 line.addLayout(actions)
                 box.addLayout(line)
                 self.content_result_layout.addWidget(frame)
-            if not data["hits"]:
-                self.content_result_layout.addWidget(empty(tr("没有找到相关内容"), tr("试试英文关键词，或取消目标实例筛选。")))
+            if not data["hits"] and not data.get("waiting_query") and not data.get("unavailable"):
+                hint = tr("试试其他关键词，或在原站继续搜索。") if state["provider"] == "mcmod" else tr("试试英文关键词，或取消目标实例筛选。")
+                self.content_result_layout.addWidget(empty(tr("没有找到相关内容"), hint))
+            if data.get("waiting_query") or data.get("unavailable"):
+                return
             previous = Button(tr("上一页"), lambda: self.content_page(-1))
             following = Button(tr("下一页"), lambda: self.content_page(1))
             previous.setEnabled(state["offset"] > 0)
             following.setEnabled(state["offset"] + 18 < data["total_hits"])
             self.content_result_layout.addLayout(row(None, previous, label(tr("第 {} 页").format(state["offset"]//18+1), "muted"), following, None))
+            self.content_result_layout.addStretch(1)
         def failed(message):
             if self.page_id == "discover" and generation == self.project_search_generation:
                 clear_layout(self.content_result_layout)
@@ -1670,6 +1749,14 @@ class LauncherWindow(LiveSettings, QMainWindow):
         self.ai_preflight_check.setObjectName("ai-auto-preflight")
         self.ai_preflight_check.setChecked(config.get("ai_auto_preflight",False))
         box.addWidget(self.ai_preflight_check)
+        for key, title in (("ai_github_search", tr("AI 搜索 GitHub 模组")),
+                           ("ai_pack_download_fallback", tr("整合包下载失败时使用 AI 补下载"))):
+            widget = QCheckBox(title)
+            widget.setObjectName(key.replace("_", "-"))
+            widget.setChecked(config.get(key, False))
+            self.settings_fields[key] = widget
+            box.addWidget(widget)
+        box.addWidget(label(tr("共用以上模型和 API。优先检索 MC百科及其项目链接，补下载保留原文件哈希校验。"), "muted", True))
         box.addWidget(label(tr("发送启用模组的元数据与相关错误日志，过滤令牌、账号和常见个人路径。静态排查无法保证发现所有运行期冲突。"),"muted",True))
         box.addLayout(row(Button(tr("测试连接"),self.test_ai_connection),Button(tr("查看上次结果"),self.show_latest_diagnostic),None))
         section, box = card()
@@ -1908,6 +1995,10 @@ class LauncherWindow(LiveSettings, QMainWindow):
         self.navigate("instance")
 
     def page_instance(self, layout):
+        if self.instance_category == "mods":
+            # Reserve the scrollbar gutter even when a filtered list fits.
+            self.page.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
+            self.page.verticalScrollBar().setStyleSheet("QScrollBar::handle:vertical:disabled { background:transparent; }")
         self.instance_panel = InstancePanel(self, self.instance_id, self.instance_category)
         layout.addWidget(self.instance_panel)
 
@@ -1988,7 +2079,27 @@ class LauncherWindow(LiveSettings, QMainWindow):
         self.navigate("discover")
 
     def project_versions(self, project):
+        if project.get("action") == "article":
+            self.open_content_url(project.get("project_url", ""))
+            return
         self.open_dialog(ProjectDialog(self, project, dict(self.search_state)))
+
+    def open_content_url(self, url):
+        try:
+            url = https_url(url)
+            if not QDesktopServices.openUrl(QUrl(url)):
+                self.toast(tr("无法打开浏览器，请检查系统默认浏览器设置。"), True)
+        except LauncherError as exc:
+            self.toast(str(exc), True)
+
+    def open_mod_website(self, url):
+        from .mod_sites import website_url
+        url = website_url(url)
+        if not url:
+            self.toast(tr("无效的模组网站地址"), True)
+            return
+        if not QDesktopServices.openUrl(QUrl(url)):
+            self.toast(tr("无法打开浏览器，请检查系统默认浏览器设置。"), True)
 
     def import_menu(self):
         dialog = NativeDialog(self, tr("添加游戏内容"), width=540)
@@ -2001,13 +2112,17 @@ class LauncherWindow(LiveSettings, QMainWindow):
         path, _ = QFileDialog.getOpenFileName(self, tr("选择整合包"), "", tr("Minecraft 整合包 (*.mrpack *.zip)"))
         if not path:
             return
-        def operation(task):
-            source = Path(path)
-            cached = self.service.store.root / "cache" / ("import-" + uuid.uuid4().hex + source.suffix)
-            cached.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(str(source), str(cached))
-            return self.service.content.import_pack(cached, task)
-        self.service.tasks.submit(tr("导入整合包 · ") + Path(path).name, operation)
+        self.import_pack_paths([path])
+
+    def import_pack_paths(self, paths):
+        seen = set()
+        for path in paths:
+            key = os.path.normcase(os.path.abspath(path))
+            if key in seen:
+                continue
+            seen.add(key)
+            self.service.tasks.submit(tr("导入整合包 · ") + Path(path).name,
+                lambda task, source=path: self.service.content.import_file(source, task))
         self.refresh()
         self.navigate("downloads")
 
@@ -2420,11 +2535,16 @@ class ProjectDialog(NativeDialog):
         super().__init__(window, project["title"], tr("选择与你的世界兼容的版本。"), 750)
         self.project, self.state = project, state
         header = QHBoxLayout()
-        header.addWidget(ProjectPreview(window.images, project.get("icon_url", ""), 96))
+        header.addWidget(ProjectPreview(window.images, project.get("icon_url", ""), 96), 0, Qt.AlignTop)
         details = QVBoxLayout()
         details.addWidget(ElidedLabel(project.get("author", ""), "muted"))
         description = SummaryLabel(project.get("description", ""), 3)
         details.addWidget(description)
+        if state["provider"] == "github":
+            details.addWidget(label(tr("安装前检查模组元数据；前置模组需要另外安装。"), "muted", True))
+        if state["provider"] in ("atlauncher", "ftb", "github") and project.get("project_url"):
+            details.addWidget(Button(tr("查看平台页面"), lambda: window.open_content_url(project["project_url"])))
+        details.addStretch(1)
         header.addLayout(details, 1)
         self.body.addLayout(header)
         self.container = QVBoxLayout()
@@ -2435,6 +2555,10 @@ class ProjectDialog(NativeDialog):
         if state["kind"] != "modpack":
             self.body.insertWidget(2, field(tr("目标版本"), self.target))
             self.target.currentIndexChanged.connect(self.load_versions)
+            if state["provider"] == "github":
+                self.github_allow_unknown = QCheckBox(tr("允许安装兼容性未确认的模组"))
+                self.github_allow_unknown.setToolTip(tr("仅允许未知的版本要求；明确不兼容或缺少前置时仍会停止安装。"))
+                self.body.insertWidget(3, self.github_allow_unknown)
         else:
             self.target.setParent(self)
             self.target.hide()
@@ -2456,7 +2580,8 @@ class ProjectDialog(NativeDialog):
             for version in versions[:60]:
                 frame, box = card()
                 box.addWidget(ElidedLabel(version["name"], "section"))
-                box.addWidget(ElidedLabel(" / ".join(version.get("game_versions", [])[:7]) + " · " + version.get("date_published", "")[:10], "muted"))
+                detail = version.get("release_name", "") if self.state["provider"] == "github" else " / ".join(version.get("game_versions", [])[:7])
+                box.addWidget(ElidedLabel(detail + " · " + version.get("date_published", "")[:10], "muted"))
                 box.addLayout(row(label(version.get("version_type", "release"), "badge"), None,
                                   Button(tr("↓ 安装"), lambda checked=False, selected=version: self.install(selected), True)))
                 self.container.addWidget(frame)
@@ -2467,8 +2592,11 @@ class ProjectDialog(NativeDialog):
         if self.state["kind"] != "modpack" and not instance:
             self.error(tr("请先创建一个游戏实例。"))
             return
-        self.window.mutate("content/install", {"project": str(self.project["project_id"]), "version": str(version["id"]), "instance": instance,
-                            "kind": self.state["kind"], "provider": self.state["provider"]}, lambda _: self.accept(), show_tasks=True)
+        payload = {"project": str(self.project["project_id"]), "version": str(version["id"]), "instance": instance,
+                   "kind": self.state["kind"], "provider": self.state["provider"]}
+        if self.state["provider"] == "github":
+            payload["allow_unknown"] = self.github_allow_unknown.isChecked()
+        self.window.mutate("content/install", payload, lambda _: self.accept(), show_tasks=True)
 
 
 class InstancePanel(QWidget):
@@ -2514,21 +2642,46 @@ class InstancePanel(QWidget):
         if not i.get("external_minecraft"):
             actions.append(Button(tr("复制版本"), lambda: self.task("instances/duplicate")))
         self.panel.addLayout(row(*actions))
-        self.panel.addLayout(row(Button(tr("导出整合包"), lambda: self.task("pack/export", {"instance": self.instance_id})), None, Button(tr("移除列表记录") if i.get("external_minecraft") else tr("移至回收目录"), self.delete, danger=True)))
+        self.panel.addLayout(row(Button(tr("导出整合包"), lambda: self.task("pack/export", {"instance": self.instance_id})), None, Button(tr("移除列表记录") if i.get("external_minecraft") else tr("删除版本"), self.delete, danger=True)))
 
     def delete(self):
         instance = self.window.service.store.instance(self.instance_id)
-        message = tr("从列表移除此版本记录？原文件夹内容会保留。") if instance.get("external_minecraft") else tr("将此实例及其存档移到本地 trash 目录？可手动恢复。")
-        if QMessageBox.question(self, tr("移除实例"), message) == QMessageBox.Yes:
+        external = bool(instance.get("external_minecraft"))
+        title = tr("移除列表记录") if external else tr("删除版本")
+        dialog = NativeDialog(self.window, title, width=560)
+        dialog.setObjectName("delete-version-dialog")
+        dialog.resize(min(560, self.window.width()), 330)
+        dialog.body.addWidget(label(instance["name"], "section", True))
+        message = tr("从列表移除此版本记录？原文件夹内容会保留。") if external else tr("确定删除此版本？此版本及其存档将移入回收目录，可手动恢复。")
+        dialog.body.addWidget(label(message, "muted", True))
+        clear_layout(dialog.footer)
+        dialog.footer.addStretch()
+        dialog.footer.addWidget(Button(tr("取消"), dialog.reject))
+        def confirmed():
+            submit.setEnabled(False)
             self.task("instances/delete")
+            dialog.accept()
+        submit = Button(title, confirmed, danger=True)
+        submit.setObjectName("confirm-delete-version")
+        dialog.footer.addWidget(submit)
+        self.window.open_dialog(dialog)
 
     def tab_content(self):
         self.content_kind = {"mods": "mod", "resourcepacks": "resourcepack", "shaders": "shader"}[self.category]
         self.local_query = text_input(placeholder=tr("搜索文件"), name="local-content-search")
         self.local_query.textChanged.connect(self.filter_local)
         self.panel.addWidget(self.local_query)
+        self.mod_status = "all"
+        if self.content_kind == "mod":
+            self.mod_status_switch = NavigationSwitch((("all", tr("全部")), ("enabled", tr("已启用")), ("disabled", tr("已禁用"))))
+            self.mod_status_switch.setObjectName("mod-status-switch")
+            self.mod_status_switch.setMaximumWidth(360)
+            self.mod_status_switch.selected.connect(self.set_mod_status)
+            self.mod_status_switch.select("all", False)
+            self.panel.addLayout(row(self.mod_status_switch, None))
         self.panel.addLayout(row(Button(tr("导入"), self.import_local), Button(tr("检查更新"), self.check_updates), Button(tr("下载") + tr(KINDS[self.content_kind]), lambda: self.window.explore(self.content_kind, self.instance_id), True)))
         self.local_items = []
+        self.local_cards = None
         self.local_layout = QVBoxLayout()
         self.panel.addLayout(self.local_layout)
         self.local_layout.addWidget(label(tr("正在读取…"), "muted"))
@@ -2545,19 +2698,84 @@ class InstancePanel(QWidget):
         elif self.category == "saves":
             self.load_backups()
 
+    def set_mod_status(self, status):
+        self.mod_status = status
+        self.mod_status_switch.select(status, self.window.animations)
+        self.filter_local()
+
     def filter_local(self):
-        clear_layout(self.local_layout)
         query = self.local_query.text().strip().lower()
-        items = [item for item in self.local_items if item["kind"] == self.content_kind and query in item["filename"].lower()]
+        items = [item for item in self.local_items if item["kind"] == self.content_kind and
+                 (self.mod_status == "all" or bool(item.get("enabled", True)) == (self.mod_status == "enabled")) and query in
+                 (item["filename"] + " " + item.get("mod_name", "") + " " + item.get("description", "")).lower()]
+        if self.content_kind == "mod":
+            if self.local_cards is None:
+                clear_layout(self.local_layout)
+                self.local_cards = VirtualCardList(self.window.page, self.create_local_card)
+                self.local_empty = empty("", "")
+                self.local_layout.addWidget(self.local_cards)
+                self.local_layout.addWidget(self.local_empty)
+            self.local_empty.findChild(QLabel, "section").setText(
+                tr("没有匹配的文件") if query or self.mod_status != "all" else tr("暂无") + tr(KINDS[self.content_kind]))
+            self.local_empty.setVisible(not items)
+            self.local_cards.setVisible(bool(items))
+            self.local_cards.set_items(items)
+            return
+        clear_layout(self.local_layout)
         if not items:
-            self.local_layout.addWidget(empty(tr("没有匹配的文件") if query else tr("暂无") + tr(KINDS[self.content_kind]), ""))
+            self.local_layout.addWidget(empty(tr("没有匹配的文件") if query or self.mod_status != "all" else tr("暂无") + tr(KINDS[self.content_kind]), ""))
         for item in items:
-            frame, box = card()
+            self.local_layout.addWidget(self.create_local_card(item))
+        self.local_layout.addStretch()
+
+    def create_local_card(self, item):
+        frame, box = card()
+        frame.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        if self.content_kind == "mod":
+            line = QHBoxLayout()
+            preview = ProjectPreview(self.window.images, "", 72)
+            preview.setObjectName("local-mod-preview")
+            if item.get("image_path"):
+                self.window.images.load_local(item["image_path"], preview)
+            elif item.get("icon_url"):
+                self.window.images.load(item["icon_url"], preview)
+            elif item.get("provider") in ("modrinth", "curseforge") and item.get("project_id"):
+                provider, project = item["provider"], str(item["project_id"])
+                self.window.images.load_project(provider, project,
+                    lambda p=provider, key=project: self.window.service.content.previews.project_image(p, key), preview)
+            line.addWidget(preview, 0, Qt.AlignTop)
+            text = QVBoxLayout()
+            text.addWidget(ElidedLabel(item.get("mod_name") or item["filename"], "section"))
+            if item.get("mod_name"):
+                text.addWidget(ElidedLabel(item["filename"], "muted"))
+            if item.get("description"):
+                text.addWidget(SummaryLabel(item["description"], 2))
+            text.addStretch()
+            line.addLayout(text, 1)
+            box.addLayout(line)
+        else:
             box.addWidget(ElidedLabel(item["filename"], "section"))
-            box.addLayout(row(label(human_bytes(item["size"]), "muted"), None,
-                              Button(tr("禁用") if item["enabled"] else tr("启用"), lambda checked=False, value=item: self.toggle(value)),
-                              Button(tr("移除"), lambda checked=False, value=item: self.toggle(value, True), danger=True)))
-            self.local_layout.addWidget(frame)
+        actions = [label(human_bytes(item["size"]), "muted"), None]
+        if self.content_kind == "mod":
+            actions.append(Button(tr("查看网站"), lambda checked=False, value=item: self.show_mod_websites(value)))
+        actions.extend((Button(tr("禁用") if item["enabled"] else tr("启用"), lambda checked=False, value=item: self.toggle(value)),
+                        Button(tr("移除"), lambda checked=False, value=item: self.toggle(value, True), danger=True)))
+        box.addLayout(row(*actions))
+        return frame
+
+    def show_mod_websites(self, item):
+        from .mod_sites import mod_websites
+        dialog = NativeDialog(self.window, tr("模组网站"), width=680)
+        dialog.setObjectName("mod-websites-dialog")
+        dialog.resize(min(680, self.window.width()), min(470, self.window.height()))
+        dialog.body.addWidget(label(item.get("mod_name") or item["filename"], "section", True))
+        for link in mod_websites(item):
+            button = Button(tr(link["title"]), lambda checked=False, url=link["url"]: self.window.open_mod_website(url))
+            button.setToolTip(link["url"])
+            address = ElidedLabel(link["url"], "muted")
+            address.setToolTip(link["url"])
+            dialog.body.addLayout(row(button, address))
+        self.window.open_dialog(dialog)
 
     def toggle(self, item, remove=False):
         if remove and QMessageBox.question(self, tr("移除内容"), tr("将此文件移到实例回收目录？")) != QMessageBox.Yes:
@@ -2588,6 +2806,7 @@ class InstancePanel(QWidget):
             self.error(tr("发现 {} 个更新").format(len(items)) if items else tr("暂无更新"))
             if not items:
                 return
+            self.local_cards = None
             clear_layout(self.local_layout)
             for item in items:
                 frame, box = card()

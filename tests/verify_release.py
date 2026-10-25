@@ -29,6 +29,15 @@ modules = archive.open_embedded_archive("PYZ.pyz").toc
 assert "launcher.diagnostics" in modules and "tomli" in modules and "launcher.live_settings" in modules
 assert "launcher.appearance" in modules and "launcher.player_skins" in modules
 assert "launcher.wallpaper_ui" in modules
+assert "launcher.providers" in modules and "launcher.pack_install" in modules
+assert "launcher.github_source" in modules
+assert "launcher.ai_downloads" in modules
+assert "launcher.mcmod_links" in modules
+assert "launcher.recovery_ui" in modules
+assert "launcher.pack_session" in modules and "launcher.pack_ui" in modules
+assert "launcher.mod_previews" in modules
+assert "launcher.mod_sites" in modules
+assert "launcher.local_list" in modules
 assert "launcher.i18n" in modules and "launcher.translations" in modules
 assert all(name in modules for name in ("launcher.updater", "launcher.update_install", "launcher.update_ui"))
 assert archive.extract(names["assets/default-background.jpg"]) == (root / "assets/default-background.jpg").read_bytes()
@@ -82,6 +91,8 @@ assert not (isolated / ".Minecraft").exists()
 config = json.loads((isolated / "data/config.json").read_text(encoding="utf-8"))
 assert config["memory_auto"] and config["download_parallel"]
 assert config["auto_check_updates"]
+assert config["ai_github_search"] is False and config["ai_pack_download_fallback"] is True
+assert config["ai_pack_download_default_on"] is True
 assert config["background_mode"] == "default" and not config["background_path"]
 assert config["background_preset"] == "default"
 assert (config["launcher_width"],config["launcher_height"]) == (900,600)
