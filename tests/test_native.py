@@ -34,6 +34,9 @@ def wait_for(predicate, timeout=4000):
         if predicate():
             return
         QTest.qWait(15)
+        # Qt's native wait can retain the GIL on some Python/PySide builds.
+        # Explicitly let Python download/task workers make progress as well.
+        time.sleep(.005)
     raise AssertionError("Native UI condition timed out")
 
 

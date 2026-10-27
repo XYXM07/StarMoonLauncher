@@ -258,7 +258,7 @@ class DiagnosticsTests(unittest.TestCase):
         process.stdout = io.BytesIO(b"java.lang.RuntimeException: fixture-fatal\n")
         process.poll.return_value = 1
         process.wait.return_value = 1
-        with patch.object(self.app.game,"ensure_java",return_value="java.exe"), patch.object(self.app.game,"profile",return_value={"javaVersion":{"majorVersion":17}}), patch.object(self.app.game,"command",return_value=["java.exe","Main"]), patch("launcher.game.subprocess.Popen",return_value=process):
+        with patch.object(self.app.game,"ensure_java",return_value="java.exe"), patch.object(self.app.game,"profile",return_value={"javaVersion":{"majorVersion":17}}), patch.object(self.app.game,"command",return_value=["java.exe","Main"]), patch("launcher.launch_options.java_architecture", return_value="x64"), patch("launcher.game.subprocess.Popen",return_value=process):
             self.app.game.launch(self.instance["id"],account["id"],Task("launch",None))
             deadline = time.time()+5
             while not self.app.tasks.list() and time.time()<deadline: time.sleep(.02)

@@ -96,7 +96,7 @@ class FolderTests(unittest.TestCase):
         process = Mock(pid=4242, stdout=io.BytesIO(b"game output\n"))
         process.poll.return_value = 0
         process.wait.return_value = 0
-        with patch.object(self.app.game, "install_files"), patch.object(self.app.game, "ensure_java", return_value="java.exe"), patch("launcher.game.java_bits", return_value=64), patch("launcher.game.subprocess.Popen", return_value=process) as start:
+        with patch.object(self.app.game, "install_files"), patch.object(self.app.game, "ensure_java", return_value="java.exe"), patch("launcher.game.java_bits", return_value=64), patch("launcher.launch_options.java_architecture", return_value="x64"), patch("launcher.game.subprocess.Popen", return_value=process) as start:
             self.app.game.launch(identifier, account["id"], Task("Launch", None))
         self.assertEqual(start.call_args.kwargs["cwd"], str(self.external))
         deadline = time.time() + 3
