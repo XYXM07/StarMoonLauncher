@@ -1,4 +1,5 @@
 import json
+import time
 import unittest
 import zipfile
 from unittest.mock import patch
@@ -13,7 +14,25 @@ from launcher.i18n import set_language
 
 class ManagementNativeTests(unittest.TestCase):
     setUp = native.NativeTests.setUp
-    tearDown = native.NativeTests.tearDown
+
+    def tearDown(self):
+        # A failed background-action assertion must not leave CI waiting for
+        # the production "tasks still running" confirmation dialog.
+        for task in self.service.tasks.tasks.values():
+            task.cancel.set()
+        deadline = time.monotonic() + 5
+        while any(not task.finished for task in self.service.tasks.tasks.values()) and time.monotonic() < deadline:
+            QTest.qWait(20)
+        with patch('launcher.desktop.QMessageBox.exec', return_value=0):
+            native.NativeTests.tearDown(self)
+
+    def wait_completed(self, dialog):
+        try:
+            wait_for(lambda: bool(self.service.tasks.tasks) and all(task.finished for task in self.service.tasks.tasks.values()))
+        except AssertionError:
+            self.fail('Background action did not finish: tasks={}, dialog={}'.format(self.service.tasks.list(), dialog.error_label.text()))
+        self.assertTrue(all(task.status == 'completed' for task in self.service.tasks.tasks.values()), self.service.tasks.list())
+        wait_for(lambda: dialog.job is None)
 
     def instance(self):
         item = self.service.game.create('Test', '1.20.1', 'fabric', '0.16.0')
@@ -34,8 +53,7 @@ class ManagementNativeTests(unittest.TestCase):
         self.assertEqual(dialog.selected(), ['a.jar'])
         dialog.actions.setCurrentIndex(dialog.actions.findData('lock'))
         dialog.apply()
-        wait_for(lambda: any(t.status == 'completed' for t in self.service.tasks.tasks.values()))
-        wait_for(lambda: dialog.job is None)
+        self.wait_completed(dialog)
         self.assertTrue(self.service.content.list_local(identifier)[0]['update_locked'])
 
     def test_dependency_tree_and_enable_repair(self):
@@ -47,8 +65,8 @@ class ManagementNativeTests(unittest.TestCase):
         dialog.table.setCurrentItem(parent.child(0))
         self.assertEqual(dialog.edge['status'], 'disabled')
         dialog.enable()
-        wait_for(lambda: (self.service.store.game_dir(identifier) / 'mods/b.jar').exists())
-        wait_for(lambda: dialog.job is None and all(t.status == 'completed' for t in self.service.tasks.tasks.values()))
+        self.wait_completed(dialog)
+        self.assertTrue((self.service.store.game_dir(identifier) / 'mods/b.jar').exists())
 
     def test_java_manager_compact_and_select(self):
         with patch('launcher.java_manager.listing', return_value=[{'path': 'C:/Java/bin/java.exe', 'version': '21', 'architecture': 'x64', 'managed': False, 'uses': [], 'size': 0}]):
