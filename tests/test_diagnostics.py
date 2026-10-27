@@ -117,10 +117,15 @@ class DiagnosticsTests(unittest.TestCase):
             with zipfile.ZipFile(self.mods/filename,"w") as z: z.writestr(metadata,text)
         with zipfile.ZipFile(self.mods/"quilt.jar","w") as z:
             z.writestr("quilt.mod.json",json.dumps({"quilt_loader":{"id":"quilt","version":"1","depends":[{"id":"missing_quilt","versions":">=1"},{"id":"optional","optional":True}]}}))
-        data,_ = self.app.diagnostics.snapshot(self.instance["id"])
-        text = " ".join(data["local_findings"])
-        for identifier in ("missing_forge","missing_neo","missing_quilt"): self.assertIn(identifier,text)
-        self.assertNotIn("optional",text)
+        for loader, identifier in (("forge", "forge"), ("neoforge", "neo"), ("quilt", "quilt")):
+            with self.subTest(loader=loader):
+                self.app.store.update_instance(self.instance["id"], {"loader": loader, "game_version": "1.21"})
+                data,_ = self.app.diagnostics.snapshot(self.instance["id"])
+                text = " ".join(data["local_findings"])
+                self.assertIn("missing_" + identifier, text)
+                for other in {"forge", "neo", "quilt"} - {identifier}:
+                    self.assertNotIn("missing_" + other, text)
+                self.assertNotIn("optional",text)
 
     def test_http_contract_redaction_bounded_response_and_no_reasoning(self):
         self.app.accounts.offline("PrivacyTester")

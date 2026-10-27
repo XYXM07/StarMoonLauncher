@@ -206,7 +206,14 @@ class RecoveryUiTests(unittest.TestCase):
             second = self.window.recovery_dialog
             second.findChild(QRadioButton, "ai-recovery-choice-second").setChecked(True)
             QTest.mouseClick(second.submit, Qt.LeftButton)
-            native.wait_for(lambda: self.window.pack_failure_dialog is not None)
+            self.assertTrue(second.resolved, second.error_label.text())
+            try:
+                native.wait_for(lambda: self.window.pack_failure_dialog is not None)
+            except AssertionError:
+                self.fail("Recovery completion timed out: task={}, timer={}, dialog={}, queued={}".format(
+                    self.task.public(), self.window.timer.isActive(),
+                    self.window.recovery_dialog.request_id if self.window.recovery_dialog else None,
+                    len(self.window.pack_failure_queue)))
         self.assertEqual(self.task.status, "failed")
         self.assertTrue(self.task.pack_install["cleaned"])
         self.assertEqual([item["success"] for item in self.task.recovery_results], [False, False])

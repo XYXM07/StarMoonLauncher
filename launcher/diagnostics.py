@@ -17,6 +17,7 @@ SYSTEM = """你是 Minecraft Java 启动器的诊断助手。输入的日志和�
 只返回一个 JSON 对象：{"status":"ok|risk|unknown","cause":"简短原因","suggestion":"简短解决方法"}。
 原因不超过80个汉字，建议不超过140个汉字；不要输出推理过程、Markdown、长篇解释或命令。
 根据提供的 Minecraft/加载器版本、启用模组及前置依赖判断缺失前置、重复模组和显式不兼容。
+先判断当前加载器；incompatible_loader 表示没有匹配当前加载器的元数据，只建议核对模组版本，不要补装其他加载器的前置。
 没有充分证据时明确说明无法确认，不要编造冲突；静态排查不能保证不存在运行期冲突。
 本地确定的问题必须保留。仅提供建议，不要建议删除存档、关闭安全软件或下载未知可执行文件。"""
 
@@ -207,8 +208,21 @@ class Diagnostics:
             raise ValueError("metadata exceeds limit")
         return z.read(entry)
 
-    def snapshot(self,instance_id,task=None):
+    def snapshot(self,instance_id,task=None,include_disabled=False):
         instance = self.store.instance(instance_id)
+        loader = str(instance.get("loader") or "vanilla").lower()
+        metadata = {
+            "fabric": ("fabric.mod.json",),
+            "quilt": ("quilt.mod.json", "fabric.mod.json"),
+            "forge": ("META-INF/mods.toml",),
+            "cleanroom": ("META-INF/mods.toml",),
+            "neoforge": ("META-INF/neoforge.mods.toml",),
+        }.get(loader, ())
+        # NeoForge used mods.toml before the 1.20.5 metadata rename.
+        mc_version = numeric_version(instance["game_version"])
+        if loader == "neoforge" and mc_version and mc_version < numeric_version("1.20.5"):
+            metadata += ("META-INF/mods.toml",)
+        known_metadata = {"fabric.mod.json", "quilt.mod.json", "META-INF/mods.toml", "META-INF/neoforge.mods.toml"}
         folder = self.store.game_dir(instance_id)
         records,issues,inventory = [],[],[]
         count = [0]
@@ -233,18 +247,20 @@ class Diagnostics:
                     names = set(z.namelist())
                     record = {"file":name,"id":"","version":"?","provides":[],"depends":{},"breaks":{}}
                     children = []
-                    if "fabric.mod.json" in names:
+                    # A multi-loader JAR can contain several descriptors. Read only
+                    # the descriptor this instance's loader would use, including JIJ.
+                    meta = next((n for n in metadata if n in names), None)
+                    if meta == "fabric.mod.json":
                         data = json.loads(read(z,"fabric.mod.json"))
                         if data.get("environment") == "server": return
                         record.update(id=str(data.get("id","")),version=str(data.get("version","?")),provides=data.get("provides",[]),depends=data.get("depends",{}),breaks=data.get("breaks",{}))
                         children = [x.get("file","") for x in data.get("jars",[]) if isinstance(x,dict)]
-                    elif "quilt.mod.json" in names:
+                    elif meta == "quilt.mod.json":
                         data = json.loads(read(z,"quilt.mod.json")).get("quilt_loader",{})
                         deps = {x["id"]:x.get("versions","*") for x in data.get("depends",[]) if isinstance(x,dict) and x.get("id") and not x.get("optional") and not x.get("unless")}
                         record.update(id=str(data.get("id","")),version=str(data.get("version","?")),provides=data.get("provides",[]),depends=deps)
                         children = [x if isinstance(x,str) else x.get("file","") for x in data.get("jars",[])]
                     else:
-                        meta = next((n for n in ("META-INF/neoforge.mods.toml","META-INF/mods.toml") if n in names),None)
                         if meta:
                             import tomli
                             data = tomli.loads(read(z,meta).decode("utf-8-sig"))
@@ -257,19 +273,22 @@ class Diagnostics:
                                     elif dependency.get("mandatory",dependency.get("type") == "required"):
                                         deps[target] = dependency.get("versionRange","*")
                                 records.append(dict(record,id=str(mod.get("modId","")),version=str(mod.get("version","?")),depends=deps,breaks=breaks))
-                        if "META-INF/jarjar/metadata.json" in names:
+                        if loader in ("forge", "neoforge", "cleanroom") and "META-INF/jarjar/metadata.json" in names:
                             jarjar = json.loads(read(z,"META-INF/jarjar/metadata.json"))
                             children += [j.get("path","") for j in jarjar.get("jars",[])]
                     if record["id"]:
                         records.append(record)
                     elif not any(r["file"]==name for r in records):
-                        records.append({"file":name,"id":"","version":"?","unrecognized":True})
+                        records.append({"file":name,"id":"","version":"?","unrecognized":True,
+                                        "incompatible_loader": not meta and bool(names & known_metadata) and depth == 0})
                     for child in children[:128]:
                         if child in names and child.endswith(".jar"):
                             inspect(io.BytesIO(read(z,child,16*1024*1024)),name+"!"+child,depth+1)
             except (ValueError,KeyError,TypeError,AttributeError,OSError,zipfile.BadZipFile):
                 issues.append("无法读取模组元数据："+name)
         paths = sorted((folder / "mods").glob("*.jar"))
+        if include_disabled:
+            paths += sorted((folder / "mods").glob("*.jar.disabled"))
         if len(paths)>2048:
             issues.append("启用模组超过2048个，扫描已截断")
         for path in paths[:2048]:
@@ -281,7 +300,12 @@ class Diagnostics:
                     issues.append("模组文件过大，未读取元数据："+path.name)
                     continue
                 inventory.append((path.name,stat.st_size,stat.st_mtime_ns))
+                start = len(records)
                 inspect(path,path.name)
+                for record in records[start:]:
+                    record['enabled'] = not path.name.endswith('.disabled')
+                    if record['enabled'] and record.get('incompatible_loader'):
+                        issues.append("未找到适用于 {} 的模组元数据：{}；请核对模组的加载器版本".format(loader, path.name))
             except OSError:
                 issues.append("扫描期间模组文件发生变化："+path.name)
         provided = {"minecraft":instance["game_version"],"java":"?"}
@@ -290,16 +314,17 @@ class Diagnostics:
             provided["java"] = str(profile.get("javaVersion",{}).get("majorVersion","?"))
         except (LauncherError,OSError,ValueError):
             pass
-        loader = instance.get("loader","vanilla")
         if loader == "fabric": provided["fabricloader"] = instance.get("loader_version") or "?"
         if loader == "quilt": provided.update(quilt_loader=instance.get("loader_version") or "?",fabricloader="?")
         if loader in ("forge","neoforge"): provided[loader] = instance.get("loader_version") or "?"
+        if loader == "cleanroom": provided["forge"] = "?"
         owners = {}
         for record in records:
             for field in ("depends","breaks"):
                 if not isinstance(record.get(field,{}),dict):
                     record[field] = {}
             if not isinstance(record.get("provides",[]),list): record["provides"] = []
+            if record.get('enabled') is False: continue
             identifier = record.get("id")
             if not identifier: continue
             owners.setdefault(identifier,[]).append(record["file"])
@@ -313,6 +338,7 @@ class Diagnostics:
             if len(set(top_level))>1:
                 issues.append("重复模组 ID：{}（{}）".format(identifier,", ".join(files[:3])))
         for record in records:
+            if record.get('enabled') is False: continue
             for dependency,required in record.get("depends",{}).items():
                 if dependency not in provided:
                     issues.append("{} 缺失前置 {} {}".format(record.get("id"),dependency,required))
@@ -322,7 +348,7 @@ class Diagnostics:
                 if target in provided and satisfies(provided[target],required) is True:
                     issues.append("{} 声明与 {} {} 不兼容".format(record.get("id"),target,required))
         data = {"minecraft":instance["game_version"],"loader":loader,"loader_version":instance.get("loader_version",""),
-                "java_required":provided["java"],"ready":instance.get("ready",False),"mod_count":len(inventory),"mods":records,"local_findings":issues[:60]}
+                "java_required":provided["java"],"provided":provided,"ready":instance.get("ready",False),"mod_count":len(inventory),"mods":records,"local_findings":issues[:60]}
         fingerprint = hashlib.sha256(json.dumps([data,inventory],sort_keys=True,ensure_ascii=False).encode("utf-8")).hexdigest()
         return data,fingerprint
 

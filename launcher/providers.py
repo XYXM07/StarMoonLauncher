@@ -28,7 +28,11 @@ PROVIDER_AGENT = "StarMoonLauncher/{} (+https://github.com/XYXM07/StarMoonLaunch
 
 
 def sources(kind):
+    if kind == "map":
+        return [("curseforge", "CurseForge")]
     values = [("modrinth", "Modrinth"), ("curseforge", "CurseForge")]
+    if kind == "resourcepack":
+        values += [("faithful", "Faithful")]
     if kind == "mod":
         values += [("github", "GitHub")]
     if kind == "modpack":

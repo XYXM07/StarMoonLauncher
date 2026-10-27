@@ -150,8 +150,9 @@ class NativeTests(unittest.TestCase):
             dialog = self.window.open_dialog(InstallDialog(self.window, "1.21.0"))
             dialog.resize(650, 570)
             QTest.qWait(220)
-            wheel(dialog.scroll.viewport())
-            self.assertGreater(dialog.scroll.verticalScrollBar().value(), 0)
+            wheel(dialog.form.options_scroll.viewport())
+            self.assertGreater(dialog.form.options_scroll.verticalScrollBar().value(), 0)
+            self.assertEqual(dialog.scroll.verticalScrollBar().maximum(), 0)
             self.assertIsNotNone(dialog.animation)
 
     def test_native_offline_account_and_settings_save(self):
@@ -207,7 +208,7 @@ class NativeTests(unittest.TestCase):
         install = self.window.install_form
         wait_for(lambda: install.submit.isEnabled())
         self.assertEqual(install.version, "1.21.1")
-        self.assertEqual(set(install.rows), set(("vanilla", "forge", "neoforge", "fabric", "quilt")))
+        self.assertEqual(set(install.rows), set(("vanilla", "forge", "neoforge", "fabric", "quilt", "optifine", "cleanroom", "liteloader")))
 
     def test_settings_draft_survives_category_switch(self):
         self.window.navigate("settings")
@@ -344,7 +345,7 @@ class NativeTests(unittest.TestCase):
     def test_top_navigation_is_exclusive_switch_with_subpages_and_keyboard(self):
         switch = self.window.navigation_switch
         self.assertTrue(self.window.top_buttons["launch"].isChecked())
-        for key,page in (("download","install"),("settings","settings"),("more","accounts"),("launch","home")):
+        for key,page in (("download","install"),("settings","settings"),("more","downloads"),("launch","home")):
             button = self.window.top_buttons[key]
             self.assertTrue(button.isCheckable())
             QTest.mouseClick(button,Qt.LeftButton)
@@ -845,8 +846,11 @@ class NativeTests(unittest.TestCase):
         wait_for(lambda: any(b.text() == "启用" for b in panel.findChildren(Button)))
         QTest.mouseClick(self.window.sidebar.findChild(Button, "instance-logs"), Qt.LeftButton)
         panel = self.window.instance_panel
-        wait_for(lambda: bool(panel.log.toPlainText()))
-        self.assertIn("还没有日志", panel.log.toPlainText())
+        from launcher.management_ui import LogPanel
+        log_panel = panel.findChild(LogPanel)
+        self.assertIsNotNone(log_panel)
+        self.assertEqual(log_panel.text.placeholderText(), "暂无日志")
+        self.assertEqual(log_panel.files.count(), 0)
         QTest.mouseClick(self.window.sidebar.findChild(Button, "instance-settings"), Qt.LeftButton)
         panel = self.window.instance_panel
         panel.instance_fields["name"].setText("Renamed Native Instance")
@@ -1030,7 +1034,7 @@ class NativeTests(unittest.TestCase):
             form = self.window.install_form
             wait_for(lambda: form.rows["quilt"]["retry"].isVisible())
             wait_for(lambda: form.rows["forge"]["versions"].count() == 2)
-            self.assertEqual({call.args[1] for call in load.call_args_list}, {"forge", "neoforge", "fabric", "quilt"})
+            self.assertEqual({call.args[1] for call in load.call_args_list}, {"forge", "neoforge", "fabric", "quilt", "optifine", "cleanroom", "liteloader"})
             self.assertTrue(form.submit.isEnabled())
             self.assertFalse(form.rows["neoforge"]["radio"].isEnabled())
             self.assertFalse(form.rows["quilt"]["radio"].isEnabled())

@@ -91,6 +91,14 @@ def request_json(url, data=None, headers=None, form=False, timeout=35):
 def mirror_url(url):
     parsed = urllib.parse.urlparse(url)
     host = parsed.hostname or ""
+    suffix = parsed.path + ("?" + parsed.query if parsed.query else "")
+    if host == "meta.fabricmc.net":
+        return MIRROR + "/fabric-meta" + suffix
+    if host == "maven.fabricmc.net":
+        return MIRROR + "/maven" + suffix
+    if host == "maven.neoforged.net" and parsed.path.startswith((
+            "/releases/net/neoforged/neoforge/", "/releases/net/neoforged/forge/")):
+        return MIRROR + "/maven" + suffix[len("/releases"):]
     if host == "resources.download.minecraft.net":
         return MIRROR + "/assets" + parsed.path
     if host == "libraries.minecraft.net":
@@ -115,6 +123,22 @@ class Network:
         for endpoint in self.urls(url):
             try:
                 return request_json(endpoint)
+            except Exception as exc:
+                error = exc
+        raise LauncherError("无法获取在线数据：{} ({})".format(urllib.parse.urlparse(url).hostname, type(error).__name__))
+
+    def xml(self, url):
+        """Fetch Maven metadata using the same selected source and fallback as JSON."""
+        import xml.etree.ElementTree as ET
+        error = None
+        for endpoint in self.urls(url):
+            try:
+                request = urllib.request.Request(endpoint, headers={"User-Agent": USER_AGENT, "Accept": "application/xml"})
+                with urllib.request.urlopen(request, timeout=35, context=SSL_CONTEXT) as response:
+                    data = response.read(4 * 1024 * 1024 + 1)
+                if len(data) > 4 * 1024 * 1024:
+                    raise LauncherError("版本元数据过大")
+                return ET.fromstring(data)
             except Exception as exc:
                 error = exc
         raise LauncherError("无法获取在线数据：{} ({})".format(urllib.parse.urlparse(url).hostname, type(error).__name__))
@@ -509,6 +533,10 @@ class Store:
         for path in paths:
             try:
                 item = read_json(path)
+                # Failed-pack cleanup can remove metadata after the directory
+                # scan. Keep refreshing the remaining instances and task UI.
+                if not isinstance(item, dict):
+                    continue
                 if item.get("external_visible") is False:
                     continue
                 item["id"] = path.parent.name
@@ -577,7 +605,7 @@ def unprotect(value):
         ctypes.windll.kernel32.LocalFree(target.data)
 
 
-def extract_zip(archive, destination, prefix="", exclude=(), task=None):
+def extract_zip(archive, destination, prefix="", exclude=(), task=None, overwrite=True):
     total = 0
     with zipfile.ZipFile(archive) as zf:
         for entry in zf.infolist():
@@ -598,6 +626,8 @@ def extract_zip(archive, destination, prefix="", exclude=(), task=None):
             if entry.is_dir():
                 path.mkdir(parents=True, exist_ok=True)
             else:
+                if not overwrite and path.exists():
+                    continue
                 path.parent.mkdir(parents=True, exist_ok=True)
                 with zf.open(entry) as source, path.open("wb") as out:
                     shutil.copyfileobj(source, out)

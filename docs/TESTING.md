@@ -4,6 +4,30 @@
 
 按项目约定，普通修改只验证本次改动及直接受影响的功能，不运行全量回归；本地构建也不自动触发全套发布验收。只有发布版本时才执行完整功能回归与发布验收。
 
+0.7.8 发布前完整回归共 439 项，全部通过，日志为 `test-results/release-regression-0.7.8.log`。发布检查修正了批量更新窗口的旧测试，并补充实例在目录枚举后被失败清理删除的竞态用例；读取时跳过已移除的实例元数据，界面继续刷新并显示失败弹窗。
+
+正式 EXE 的单文件资源、Windows 版本、WAM、默认值、透明四角、中英文与预设壁纸重启验收通过，日志为 `test-results/release-acceptance-0.7.8.log`。0.7.7 → 0.7.8 实际辅助进程完成替换、备份、重启，保留便携目录设置、账号文件与存档，记录为 `test-results/auto-update-acceptance-0.7.8.log` 及对应 JSON。所有验收仅操作独立测试目录。
+
+依赖扫描加载器匹配修复定向验证共 18 项，日志为 `test-results/dependency-loader-targeted.log`（16 项）和 `test-results/dependency-loader-native.log`（2 项）。覆盖多加载器 JAR 的元数据选择、Forge 嵌套依赖、Quilt 的 Fabric 兼容、旧 NeoForge 描述文件、错误加载器模组及禁用项不提供前置、真实 Fabric 前置仍正常报缺失、修复候选加载器不符时回滚、缓存更新及界面状态。均使用临时测试模组，未运行全量回归或启动 Minecraft。
+
+模组批量管理、整合包升级、依赖修复、Java 管理和问题报告定向验证共 46 项，通过日志为 `test-results/management-targeted.log`。覆盖启停/删除/锁定/忽略更新、文件哈希来源识别、禁用状态保持、写入前日志与中断恢复、失败和取消回滚、整合包三方比对与配置冲突、原实例和存档保留、手动导入旧前置替换、错误候选与新增依赖问题拒绝、托管 Java 清理范围、日志筛选和脱敏，以及相关模组预览、日志入口、多开、整合包清理、中英文 UI。所有游戏数据使用临时夹具，未运行全量回归。
+
+`python tests/integration_management.py --download-java` 已验证真实 Modrinth SHA-512 查询、整合包版本目录和 Adoptium Java 目录，并在独立临时目录下载、校验、执行 Java 21（实测输出 `21.0.12.1`）；日志为 `test-results/management-live.log`。未启动完整 Minecraft 或验证所有整合包组合。紧凑窗口及英文界面截图位于 `test-results/management-preview/`。[使用说明](MANAGEMENT.md)
+
+高级启动设置定向验证共 24 项，日志为 `test-results/launch-options-targeted.log`。覆盖四个开关的独立持久化与校验、默认/自定义/必需 JVM 参数、Java 兼容检查、原生库架构选择与保留原文件、启动文件检查、整合包未完成状态、多开、外部目录与英文界面。真实渲染验证命令为 `python tests/integration_renderers.py --probe-graphics`，日志 `test-results/renderers-live.log` 和 `test-results/renderer-integration/`：校验下载的 Mesa 运行库，在独立临时目录通过隐藏 GLFW 窗口实际创建 LLVMpipe、Zink Vulkan 1.4 和 D3D12 上下文，均返回 OpenGL 4.6；未启动 Minecraft，也不代表所有游戏/模组和显卡驱动的组合均已验证。
+
+Faithful 来源定向验证共 19 项，日志为 `test-results/faithful-targeted.log`。覆盖 Java 系列与分类隔离、检索和版本范围、官方目录回退、Modrinth 精确文件及哈希、无效 ZIP 拒绝、下载和记录失败回滚、启用状态保持、同名玩家文件保留、原生安装流程、署名/官网/许可入口及中英文。真实目录与独立临时安装见 `test-results/faithful-live.log`，已实际安装并校验一个约 11 MB 的 Faithful 32x 包；`test-results/faithful-modrinth-live.log` 验证两种 64x 分发链接解析。命令为 `python tests/integration_faithful.py --download-one --resolve-modrinth`，不启动游戏，也不接触用户现有实例。
+
+加载器重试与镜像接入定向验证共 16 项，日志为 `test-results/loader-retry-mirrors-targeted.log`。覆盖鼠标和键盘重试时卡片尺寸、滚动位置不变，等待期间手动滚动不被结果覆盖，其他加载器结果保持，Fabric / NeoForge 镜像路由、官方源选择、网络与 XML 解析失败回退、元数据大小限制及原文件哈希校验。可选真实网络检查为 `python tests/integration_loader_mirrors.py`，仅读取公开版本列表与 Fabric 启动配置，不安装或启动游戏；日志为 `test-results/loader-mirrors-live.log`。
+
+自动安装布局定向验证共 6 项，日志为 `test-results/install-layout-targeted.log`。覆盖 900×600 最小窗口下版本列表与「继续」完整可见、顶部「重新选择原版」左邻「安装游戏」、加载器列表占满宽度且独立滚动、中英文按钮显示、窄窗口单列与宽窗口双列切换，以及加载器选择与安装参数保持。界面预览位于 `test-results/install-layout-preview/`，未执行全量回归或发布验收。
+
+数据包/地图、额外加载器、窗口标题、自定义导出和截图功能定向验证共 28 项，通过记录为 `test-results/instance-features-targeted.log`。包括格式往返、选择内容与目录、取消导出清理、地图不覆盖旧存档、数据包路径与版本检查、LiteLoader 模组、真实 Win32 测试窗口标题、截图分页与异步预览、新界面中英文及直接受影响的版本管理用例。真实加载器验证见 `test-results/extra-loaders-live.log` 和 `test-results/liteloader-live.log`；操作仅限独立测试目录，未启动完整 Minecraft。[使用与来源](INSTANCE_FEATURES.md)
+
+账号入口合并仅验证本次导航与直接受影响功能，共 11 项，日志为 `test-results/account-navigation-targeted.log`。覆盖「设置 → 账号管理」直接展示、启动页快捷入口、旧路由重定向、「更多」保留任务与关于、账号添加移除后的列表刷新、正版登录入口、中英文切换、离线皮肤头像、玩家皮肤下载与实时设置。
+
+账户管理修复定向运行 `test_account_management_native.py`，并选择旧有离线皮肤、账号切换和正版头像用例，共 7 项，日志为 `test-results/account-management-targeted.log`。复现配置过自定义皮肤的离线账号与正版账号同时存在时，因缺少 `QImage` 导入导致账户页构建失败、刷新计时器停止的问题。验证头像实际颜色、当前账号切换与持续刷新；所有数据为临时夹具，正版皮肤请求使用模拟。
+
 0.7.7 发布前完整回归共 339 项，全部通过，日志为 `test-results/release-regression-0.7.7.log`。正式 EXE 通过单文件资源、Windows 版本、WAM、默认值、透明四角、中英文和壁纸重启验收；另以 0.7.6 正式 EXE 为旧程序，实际验证更新至 0.7.7 后的替换、备份、重启和便携数据保持。记录为 `test-results/release-acceptance-0.7.7.log`、`test-results/auto-update-acceptance-0.7.7.log` 及对应 JSON；测试产物不上传源码仓库。
 
 正版头像与模组图片可定向运行 `test_player_skins.py`、`test_mod_previews.py`、`test_visual_native.py`，并选择 `test_native.py` 中离线头像、旧皮肤外层与异步图片加载相关用例；本次相关验证共 25 项，日志为 `test-results/account-mod-art-targeted.log`。使用模拟官方皮肤响应和临时 JAR，不发起真实账号登录。
@@ -57,7 +81,7 @@ AI 下载功能当前有 25 项后端回归、10 项 MC百科链接回归与 2 �
 构建后执行：
 
 ```powershell
-.\.venv\Scripts\python.exe tests/verify_release.py dist/StarMoonLauncher-0.7.7-windows-x64.exe
+.\.venv\Scripts\python.exe tests/verify_release.py dist/StarMoonLauncher-0.7.8-windows-x64.exe
 ```
 
 检查 Windows 文件版本、资源、模块、图标、WAM DLL，并将 EXE 复制到独立临时目录启动，验证默认紧凑尺寸、不自动创建游戏目录、透明四角、预设壁纸切换，以及英文界面和语言选择在多次解包重启后保持。它会启动自己的测试窗口并自动退出，结果位于 `test-results/release-verification.json`。

@@ -70,7 +70,7 @@ def add_folder(manager, path, select=True):
             if not profile.get("mainClass"):
                 continue
             identifier = (version + " " + profile.get("mainClass", "") + " " + " ".join(lib.get("name", "") for lib in profile.get("libraries", []))).lower()
-            loader = next((name for name in ("neoforge", "fabric", "quilt", "forge") if name in identifier), "vanilla")
+            loader = next((name for name in ("cleanroom", "liteloader", "neoforge", "fabric", "quilt", "forge", "optifine") if name in identifier), "vanilla")
             chain, current = [], version
             while current:
                 if current in chain:
@@ -79,6 +79,8 @@ def add_folder(manager, path, select=True):
                 current = read_json(bound.profile_path(current), {}).get("inheritsFrom")
             base = read_json(bound.profile_path(chain[-1]))
             game_version = base.get("clientVersion") or base.get("id", chain[-1])
+            if loader == "cleanroom":
+                game_version = base.get("clientVersion") or "1.12.2"
             match = re.search(r"(?:^|[^\d])(1\.\d+(?:\.\d+)?)(?:$|[^\d])", game_version)
             if match:
                 game_version = match.group(1)

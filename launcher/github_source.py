@@ -239,7 +239,8 @@ class GitHubSource:
 
     def validate(self, records, instance_id, task, allow_unknown=False):
         instance = self.content.store.instance(instance_id)
-        matching = [r for r in records if r["loader"] == instance["loader"] and not r["server_only"]]
+        effective_loader = "forge" if instance["loader"] == "cleanroom" else instance["loader"]
+        matching = [r for r in records if r["loader"] == effective_loader and not r["server_only"]]
         if not matching:
             raise LauncherError("此附件的加载器或运行端与目标实例不匹配")
         snapshot, _ = Diagnostics(self.content.store, self.content.game).snapshot(instance_id, task)
@@ -252,7 +253,7 @@ class GitHubSource:
                     provided[alias["id"]] = str(alias.get("version") or record["version"])
         provided.update({r["id"]: r["version"] for r in matching})
         provided.update(minecraft=instance["game_version"], java=snapshot.get("java_required", "?"))
-        provided[instance["loader"] if instance["loader"] in ("forge", "neoforge") else "fabricloader" if instance["loader"] == "fabric" else "quilt_loader"] = instance.get("loader_version") or "?"
+        provided[effective_loader if effective_loader in ("forge", "neoforge") else "fabricloader" if effective_loader == "fabric" else "quilt_loader"] = "?" if instance["loader"] == "cleanroom" else instance.get("loader_version") or "?"
         unknown = False
         for record in matching:
             for identifier, required in record.get("breaks", {}).items():

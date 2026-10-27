@@ -8,6 +8,7 @@ import test_mod_filters as filters
 from PySide6.QtCore import QAbstractAnimation, Qt
 from PySide6.QtTest import QTest
 from launcher.widgets import Button, ElidedLabel
+from launcher.management_ui import BulkModsDialog
 
 
 class ModListNativeTests(unittest.TestCase):
@@ -77,15 +78,20 @@ class ModListNativeTests(unittest.TestCase):
         QTest.qWait(100)
         self.assertEqual(self.panel.content_kind, "resourcepack")
 
-    def test_update_results_can_be_replaced_by_normal_filter_again(self):
+    def test_bulk_update_dialog_keeps_normal_filter_available(self):
         self.large_list()
         result = dict(filename="mod-0000.jar", kind="mod", new_name="New release", new_version="new",
                       provider="modrinth", project_id="example")
-        def respond(path, **callbacks):
-            callbacks["success"]([result])
-        with patch.object(self.window, "request", side_effect=respond):
+        with patch.object(self.service.content, "list_local", return_value=self.panel.local_items), \
+             patch.object(self.service.content, "check_updates", return_value=[result]):
             self.panel.check_updates()
-        self.assertIsNone(self.panel.local_cards)
+            native.wait_for(lambda: self.window.findChild(BulkModsDialog) is not None)
+            dialog = self.window.findChild(BulkModsDialog)
+            native.wait_for(lambda: result["filename"] in dialog.updates)
+            self.assertEqual(dialog.table.topLevelItem(0).text(2), "New release")
+            dialog.reject()
+        self.assertIs(self.panel.local_cards, self.cards)
+        self.assertEqual(len(self.cards.items), 1000)
         self.panel.set_mod_status("disabled")
         native.wait_for(lambda: bool(self.panel.local_cards.rows))
         self.assertEqual(len(self.panel.local_cards.items), 500)

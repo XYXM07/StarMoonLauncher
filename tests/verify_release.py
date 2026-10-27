@@ -38,6 +38,8 @@ assert "launcher.pack_session" in modules and "launcher.pack_ui" in modules
 assert "launcher.mod_previews" in modules
 assert "launcher.mod_sites" in modules
 assert "launcher.local_list" in modules
+assert all(name in modules for name in ("launcher.management", "launcher.management_ui", "launcher.pack_updates", "launcher.dependencies", "launcher.java_manager", "launcher.problem_reports"))
+assert all(name in modules for name in ("launcher.extra_loaders", "launcher.game_title", "launcher.world_content", "launcher.screenshots", "launcher.instance_ui", "launcher.pack_export", "launcher.faithful", "launcher.launch_options"))
 assert "launcher.i18n" in modules and "launcher.translations" in modules
 assert all(name in modules for name in ("launcher.updater", "launcher.update_install", "launcher.update_ui"))
 assert archive.extract(names["assets/default-background.jpg"]) == (root / "assets/default-background.jpg").read_bytes()

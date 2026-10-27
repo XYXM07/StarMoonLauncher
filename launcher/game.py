@@ -12,7 +12,6 @@ import threading
 import time
 import urllib.parse
 import uuid
-import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from .core import (MANIFEST, Cancelled, LauncherError, atomic_json, extract_zip,
@@ -26,7 +25,7 @@ def os_name():
     return {"Windows": "windows", "Darwin": "osx"}.get(platform.system(), "linux")
 
 
-def rules_allow(rules, features=None):
+def rules_allow(rules, features=None, architecture=None):
     if not rules:
         return True
     allowed = False
@@ -35,7 +34,7 @@ def rules_allow(rules, features=None):
         if system.get("name", os_name()) != os_name():
             continue
         arch = system.get("arch")
-        machine = platform.machine().lower()
+        machine = (architecture or platform.machine()).lower()
         current_arch = "x86" if machine in ("x86", "i386", "i686") else "arm64" if "arm" in machine or "aarch" in machine else "x86_64"
         if arch and arch.replace("amd64", "x86_64") != current_arch:
             continue
@@ -169,7 +168,7 @@ class GameManager:
     def create(self, name, version, loader="vanilla", loader_version="", on_created=None):
         self.store.require_minecraft()
         valid_id(version)
-        if loader not in ("vanilla", "fabric", "quilt", "forge", "neoforge"):
+        if loader not in ("vanilla", "fabric", "quilt", "forge", "neoforge", "optifine", "cleanroom", "liteloader"):
             raise LauncherError("不支持此加载器")
         name = (name or version).strip()[:80]
         instance_id = "instance-" + uuid.uuid4().hex[:10]
@@ -182,6 +181,9 @@ class GameManager:
                 "loader": loader, "loader_version": loader_version, "ready": False,
                 "created": time.time(), "last_played": 0, "play_seconds": 0,
                 "memory": 0, "java_path": "", "jvm_args": "", "game_args": ""}
+        data["window_title"] = ""
+        from .launch_options import DEFAULTS
+        data.update(DEFAULTS)
         atomic_json(directory / "instance.json", data)
         self.store.save({"selected_instance": instance_id, "library_root": str(self.store.minecraft_root)})
         return data
@@ -200,6 +202,9 @@ class GameManager:
 
     def loader_versions(self, version, loader):
         version = valid_id(version)
+        if loader in ("optifine", "cleanroom", "liteloader"):
+            from .extra_loaders import versions
+            return versions(self, version, loader)
         encoded = urllib.parse.quote(version, safe="")
         if loader in ("fabric", "quilt"):
             host = "https://meta.fabricmc.net" if loader == "fabric" else "https://meta.quiltmc.org"
@@ -215,11 +220,7 @@ class GameManager:
                 values = [result.get("promos", {}).get(version + "-" + key) for key in ("recommended", "latest")]
                 return [{"version": v, "stable": True} for v in dict.fromkeys(v for v in values if v)]
         if loader == "neoforge":
-            from urllib.request import Request, urlopen
-            from .core import USER_AGENT
-            from .core import SSL_CONTEXT
-            with urlopen(Request("https://maven.neoforged.net/releases/net/neoforged/neoforge/maven-metadata.xml", headers={"User-Agent": USER_AGENT}), timeout=30, context=SSL_CONTEXT) as response:
-                root = ET.fromstring(response.read())
+            root = self.net.xml("https://maven.neoforged.net/releases/net/neoforged/neoforge/maven-metadata.xml")
             # NeoForge's major.minor tracks MC 1.major.minor (1.21.1 -> 21.1).
             parts = version.split(".")
             if len(parts) < 2 or parts[0] != "1":
@@ -233,6 +234,9 @@ class GameManager:
         version = instance["game_version"]
         if loader == "vanilla":
             return version
+        if loader in ("optifine", "cleanroom", "liteloader"):
+            from .extra_loaders import install
+            return install(self, instance, task)
         chosen = instance.get("loader_version")
         if not chosen:
             versions = self.loader_versions(version, loader)
@@ -285,10 +289,14 @@ class GameManager:
             raise LauncherError("安装器没有生成可用的客户端版本，请查看 installer.log")
         return candidates[0]
 
-    def libraries(self, profile):
+    def libraries(self, profile, instance=None, java=None):
+        from .launch_options import native_architecture
+        selected_java = java or (instance or {}).get("java_path") or self.store.config().get("java_path")
+        architecture = native_architecture(instance,selected_java)
         results = []
         for lib in profile.get("libraries", []):
-            if not rules_allow(lib.get("rules")):
+            native_artifact = ":natives-" in lib.get("name", "")
+            if not rules_allow(lib.get("rules"),architecture=architecture if native_artifact else None):
                 continue
             downloads = lib.get("downloads", {})
             artifact = downloads.get("artifact")
@@ -299,7 +307,8 @@ class GameManager:
                 results.append({"path": path, "url": lib.get("url", "https://libraries.minecraft.net/").rstrip("/") + "/" + path, "native": False})
             classifier = lib.get("natives", {}).get(os_name())
             if classifier:
-                classifier = classifier.replace("${arch}", "64" if platform.machine().endswith("64") else "32")
+                bits = "32" if architecture=="x86" else "64" if architecture else "64" if platform.machine().endswith("64") else "32"
+                classifier = classifier.replace("${arch}",bits)
                 native = downloads.get("classifiers", {}).get(classifier)
                 if native:
                     results.append(dict(native, native=True, exclude=lib.get("extract", {}).get("exclude", [])))
@@ -318,7 +327,8 @@ class GameManager:
                 last = None
                 for url in job.get("urls") or [job["url"]]:
                     try:
-                        self.net.download(url, job["target"], sha1=job.get("sha1"), sha512=job.get("sha512"), task=progress.file(index), size=job.get("size"))
+                        checks = {key: job[key] for key in ("sha256", "md5") if job.get(key)}
+                        self.net.download(url, job["target"], sha1=job.get("sha1"), sha512=job.get("sha512"), task=progress.file(index), size=job.get("size"), **checks)
                         return
                     except Cancelled:
                         raise
@@ -340,14 +350,14 @@ class GameManager:
                     future.cancel()
                 raise
 
-    def install_files(self, instance, task, native_directory=None):
+    def install_files(self, instance, task, native_directory=None, java=None):
         profile = self.profile(instance["version"])
         jobs = []
         client = profile.get("downloads", {}).get("client")
         base_id = instance.get("client_jar_version") or profile.get("jar") or instance["game_version"]
         if client:
             jobs.append(dict(client, target=safe_path(self.mc / "versions", base_id + "/" + base_id + ".jar")))
-        libs = self.libraries(profile)
+        libs = self.libraries(profile,instance,java)
         for lib in libs:
             jobs.append(dict(lib, target=safe_path(self.mc / "libraries", lib["path"])))
         asset = profile.get("assetIndex")
@@ -371,7 +381,8 @@ class GameManager:
         for lib in libs:
             if lib["native"]:
                 extract_zip(safe_path(self.mc / "libraries", lib["path"]), natives,
-                            exclude=["META-INF/"] + lib.get("exclude", []), task=task)
+                            exclude=["META-INF/"] + lib.get("exclude", []), task=task,
+                            overwrite=not instance.get("skip_native_patch",False))
         if asset:
             index = read_json(index_path)
             # Legacy Minecraft versions expect the resources to be materialized.
@@ -396,7 +407,7 @@ class GameManager:
         if instance["loader"] in ("forge", "neoforge"):
             vanilla = dict(instance, version=instance["game_version"])
             self.install_files(vanilla, task)
-        if not instance.get("loader_installed"):
+        if not instance.get("loader_installed") or instance["loader"] in ("optifine", "cleanroom", "liteloader"):
             version = self.install_loader(instance, task)
             self.store.update_instance(instance_id, {"version": version, "loader_installed": True})
         instance = self.store.instance(instance_id)
@@ -437,6 +448,8 @@ class GameManager:
                 selected = self.inspect_java(custom)
             if not selected:
                 raise LauncherError("无法识别指定的 Java，请选择有效的 java.exe")
+            if (instance or {}).get("skip_java_check"):
+                return custom
             if selected["major"] == required:
                 return custom
             if not config["java_auto"]:
@@ -445,6 +458,8 @@ class GameManager:
         exact = next((j for j in candidates if j["major"] == required), None)
         if exact:
             return exact["path"]
+        if (instance or {}).get("skip_java_check") and candidates:
+            return candidates[0]["path"]
         if not config["java_auto"]:
             raise LauncherError("游戏需要 Java {}，请在设置中指定 Java，或打开自动下载".format(required))
         if os.name != "nt":
@@ -496,7 +511,7 @@ class GameManager:
         profile = self.profile(instance["version"])
         config = self.store.config()
         directory = self.store.instance_dir(instance["id"])
-        classpath = [str(safe_path(self.mc / "libraries", lib["path"])) for lib in self.libraries(profile) if not lib["native"]]
+        classpath = [str(safe_path(self.mc / "libraries", lib["path"])) for lib in self.libraries(profile,instance,java) if not lib["native"]]
         jar_version = instance.get("client_jar_version") or profile.get("jar") or instance["game_version"]
         classpath.append(str(safe_path(self.mc / "versions", jar_version + "/" + jar_version + ".jar")))
         asset_id = profile.get("assetIndex", {}).get("id", profile.get("assets", "legacy"))
@@ -527,7 +542,11 @@ class GameManager:
         mod_count = sum(1 for path in mods.glob("*.jar") if path.is_file())
         memory = effective_memory(config, instance, mod_count=mod_count,
                                   legacy=profile.get("javaVersion", {}).get("majorVersion", 8) < 17, bits=java_bits(java))
-        command = [java, "-Xms256M", "-Xmx{}M".format(memory), "-Dfile.encoding=UTF-8"]
+        command = [java]
+        if not instance.get("no_default_jvm_args"):
+            command += ["-Xms256M", "-Xmx{}M".format(memory), "-Dfile.encoding=UTF-8"]
+        from .launch_options import renderer_arguments
+        command += renderer_arguments(self.store,instance,java,runtime_directory or directory)
         command += jvm + split_args(config["jvm_args"]) + split_args(instance.get("jvm_args"))
         log = profile.get("logging", {}).get("client")
         if log:
@@ -555,26 +574,29 @@ class GameManager:
         runtime = directory / "runs" / process_id
         runtime.mkdir(parents=True,exist_ok=True)
         instance = self.store.instance(instance_id)
-        if instance.get("external_minecraft"):
-            # Reuse original assets/libraries and prepare private native binaries.
-            # No external profile or game content is copied into managed storage.
-            self.install_files(instance, task, native_directory=runtime/"natives")
         if not instance.get("ready"):
             self.install(instance_id, task)
             instance = self.store.instance(instance_id)
         if not instance.get("ready"):
             raise LauncherError("整合包内容尚未完整安装，请重新导入整合包；修复游戏文件不会跳过缺失的整合包内容")
-        task.update("验证账号与 Java 环境", 96)
+        task.update("验证账号与 Java 环境", 5)
         account = self.accounts.for_launch(account_id)
         profile = self.profile(instance["version"])
         java = self.ensure_java(profile.get("javaVersion", {}).get("majorVersion", 8), task, instance)
+        original_natives = directory/"natives"
+        if original_natives.is_dir():
+            shutil.copytree(str(original_natives),str(runtime/"natives"))
+        if not instance.get("skip_game_check"):
+            self.install_files(instance,task,native_directory=runtime/"natives",java=java)
+        from .launch_options import prepare_renderer
+        prepare_renderer(self,instance,java,task)
         if not (runtime/"natives").exists():
             original_natives = directory/"natives"
             if original_natives.is_dir():
                 shutil.copytree(str(original_natives),str(runtime/"natives"))
             else:
                 (runtime/"natives").mkdir()
-                for lib in self.libraries(profile):
+                for lib in self.libraries(profile,instance,java):
                     if lib["native"]:
                         extract_zip(safe_path(self.mc/"libraries",lib["path"]),runtime/"natives",exclude=["META-INF/"]+lib.get("exclude",[]),task=task)
         skin = self.skins.prepare(account)
@@ -600,6 +622,8 @@ class GameManager:
             if skin: skin.close()
             raise
         started = time.time()
+        from .game_title import render_title, watch_title
+        watch_title(process, render_title(instance.get("window_title"), instance, account))
         record = {"instance_id":instance_id,"process": process, "started": started, "exit_code": None,
                   "skin_session":skin,"stop_requested":False,"log_path":str(log_path),"game_directory":str(game_directory),"shared_directory":False}
         with self.process_lock:

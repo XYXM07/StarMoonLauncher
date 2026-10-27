@@ -33,6 +33,9 @@ class Application:
         self.player_skins = PlayerSkins(self.store)
         self.content = ContentManager(self.store, self.net, self.game)
         self.diagnostics = Diagnostics(self.store,self.game)
+        from .management import Management
+        self.management = Management(self)
+        self.content.operation_guard = self.management.guard
         self.diagnostic_jobs = {}
         self.game.on_exit = self.on_game_exit
         self.updater = UpdateManager(self.store, self.net)
@@ -44,6 +47,8 @@ class Application:
                 "minecraft_folders": self.store.folders(), "version": __version__}
 
     def running_check(self, instance_id):
+        with self.management.guard(instance_id):
+            pass
         if any(p["instance_id"] == instance_id and (p["running"] or not p.get("finalized",True)) for p in self.game.process_status()):
             raise LauncherError("请先关闭此实例的游戏")
 
@@ -98,6 +103,10 @@ class Application:
         return self.store.public_config()
 
     def start_game(self,instance_id,account_id,task,skip_preflight=False):
+        with self.management.runtime_lock, self.management.guard(instance_id, launching=True):
+            return self._start_game(instance_id, account_id, task, skip_preflight)
+
+    def _start_game(self,instance_id,account_id,task,skip_preflight=False):
         if self.store.config().get("ai_auto_preflight") and not skip_preflight:
             task.update("启动前智能排查",1)
             try:
@@ -154,6 +163,24 @@ class Application:
         def q(key, default=""):
             return query.get(key, [default])[0]
         if method == "GET":
+            if path == '/api/management/history':
+                from .management import history
+                return history(self.store, q('instance'))
+            if path == '/api/dependencies':
+                from .dependencies import graph
+                return graph(self, q('instance'))
+            if path == '/api/dependencies/candidates':
+                from .dependencies import candidates
+                return candidates(self, q('instance'), q('dependency'), q('provider', 'modrinth'))
+            if path == '/api/java/manager':
+                from .java_manager import listing
+                return listing(self)
+            if path == '/api/reports/logs':
+                from .problem_reports import logs
+                return logs(self, q('instance'))
+            if path == '/api/reports/read':
+                from .problem_reports import read_log
+                return read_log(self, q('instance'), q('log'), q('search'), q('level', 'all'))
             if path == "/api/state":
                 return self.state()
             if path == "/api/manifest":
@@ -168,6 +195,12 @@ class Application:
                 return self.content.versions(q("project"), q("instance"), q("kind", "mod"), q("provider", "modrinth"))
             if path == "/api/content/local":
                 return self.content.list_local(q("instance"))
+            if path == "/api/worlds":
+                from .world_content import worlds
+                return worlds(self.store, q("instance"))
+            if path == "/api/screenshots":
+                from .screenshots import listing
+                return listing(self.store, q("instance"))
             if path == "/api/content/updates":
                 return self.content.check_updates(q("instance"))
             if path == "/api/log":
@@ -180,6 +213,33 @@ class Application:
                 directory = self.store.instance_dir(q("instance")) / "backups"
                 return [{"name": p.name, "size": p.stat().st_size, "date": p.stat().st_mtime} for p in sorted(directory.glob("*.zip"), reverse=True)]
         if method == "POST":
+            if path == '/api/content/identify':
+                from .management import identify_mods
+                return self.tasks.submit('识别模组更新来源', lambda t: identify_mods(self, body['instance'], t))
+            if path == '/api/content/impact':
+                from .dependencies import impact
+                return impact(self, body['instance'], body['files'])
+            if path == '/api/content/bulk':
+                from .management import bulk
+                return self.tasks.submit('批量管理模组', lambda t: bulk(self, body['instance'], body['action'], body['files'], t, body.get('versions')))
+            if path == '/api/management/restore':
+                from .management import restore_change
+                return self.tasks.submit('恢复版本变更', lambda t: restore_change(self, body['instance'], body['change'], t))
+            if path == '/api/pack/upgrade':
+                from .pack_updates import upgrade
+                return self.tasks.submit('升级整合包', lambda t: upgrade(self, body['instance'], body['provider'], body['project'], body['version'], body.get('current_version'), t))
+            if path == '/api/dependencies/repair':
+                from .dependencies import repair
+                return self.tasks.submit('修复模组依赖', lambda t: repair(self, body['instance'], body['dependency'], body.get('project'), body.get('version'), body.get('provider'), body.get('disabled_file'), t))
+            if path == '/api/java/download':
+                from .java_manager import download
+                return self.tasks.submit('下载 Java', lambda t: download(self, body['major'], body['architecture'], t))
+            if path == '/api/java/remove':
+                from .java_manager import remove
+                return self.tasks.submit('清理 Java', lambda t: remove(self, body['path'], t))
+            if path == '/api/reports/export':
+                from .problem_reports import export
+                return self.tasks.submit('导出问题报告', lambda t: export(self, body['instance'], body['destination'], t))
             if path == "/api/config":
                 return self.config_update(body)
             if path == "/api/diagnostics/analyze":
@@ -231,7 +291,7 @@ class Application:
                 return dict(result, instance_id=instance["id"])
             if path == "/api/instances/repair":
                 self.running_check(body["id"])
-                return self.tasks.submit("修复游戏文件", lambda t: self.game.install(body["id"], t))
+                return self.tasks.submit("修复游戏文件", lambda t: self.management.run(body['id'], self.game.install, body['id'], t))
             if path == "/api/instances/launch":
                 return self.tasks.submit("启动游戏", lambda t: self.start_game(body["id"],body["account"],t,bool(body.get("skip_preflight"))))
             if path == "/api/instances/stop":
@@ -239,7 +299,18 @@ class Application:
                 return {}
             if path == "/api/instances/update":
                 self.running_check(body["id"])
-                changes = {k: v for k, v in body.items() if k in ("name", "memory", "memory_mode", "java_path", "jvm_args", "game_args")}
+                from .launch_options import DEFAULTS, RENDERERS
+                changes = {k: v for k, v in body.items() if k in ("name", "memory", "memory_mode", "java_path", "jvm_args", "game_args", "window_title") or k in DEFAULTS}
+                if "renderer" in changes and changes["renderer"] not in dict(RENDERERS):
+                    raise LauncherError("未知渲染器")
+                for key in DEFAULTS:
+                    if key!="renderer" and key in changes and type(changes[key]) is not bool:
+                        raise LauncherError("高级启动开关必须为布尔值")
+                if "window_title" in changes:
+                    title = str(changes["window_title"]).strip()
+                    if len(title) > 200 or any(ord(character) < 32 for character in title):
+                        raise LauncherError("游戏窗口标题不能超过 200 字符或包含控制字符")
+                    changes["window_title"] = title
                 if "memory_mode" in changes and changes["memory_mode"] not in ("inherit", "auto", "manual"):
                     raise LauncherError("未知内存模式")
                 if "name" in changes:
@@ -267,7 +338,7 @@ class Application:
                     if self.store.config()["selected_instance"] == body["id"]:
                         self.store.save({"selected_instance": ""})
                     return {"path": str(destination)}
-                return self.tasks.submit("将实例移至回收目录", recycle)
+                return self.tasks.submit("将实例移至回收目录", lambda t: self.management.run(body['id'], recycle, t))
             if path == "/api/instances/duplicate":
                 def duplicate(task):
                     self.running_check(body["id"])
@@ -294,12 +365,14 @@ class Application:
                 from .folders import add_folder
                 return add_folder(self.game, body["path"])
             if path == "/api/content/install":
+                if body["kind"] in ("datapack", "map"):
+                    return self.tasks.submit("安装存档内容", lambda t: self.content.install_project(str(body["project"]), str(body["version"]), body.get("instance", ""), body["kind"], body.get("provider", "modrinth"), t, world=body.get("world", "")))
                 options = {"allow_unknown": body.get("allow_unknown") is True} if body.get("provider") == "github" else {}
                 return self.tasks.submit("安装下载内容", lambda t: self.content.install_project(str(body["project"]), str(body["version"]), body.get("instance", ""), body["kind"], body.get("provider", "modrinth"), t, **options))
             if path == "/api/content/toggle":
                 return self.tasks.submit("管理实例内容", lambda t: self.content.toggle(body["instance"], body["filename"], body["kind"], body.get("remove", False)))
             if path == "/api/pack/export":
-                return self.tasks.submit("导出整合包", lambda t: self.content.export_pack(body["instance"], t))
+                return self.tasks.submit("导出整合包", lambda t: self.content.export_pack(body["instance"], t, body.get("options")))
             if path == "/api/backup":
                 def backup(task):
                     self.running_check(body["instance"])
@@ -322,7 +395,7 @@ class Application:
                 if body.get("instance"):
                     directory = self.store.instance_dir(body["instance"])
                     game = self.store.game_dir(body["instance"])
-                    targets.update(game=game, mods=game / "mods", saves=game / "saves", instance=directory, backups=directory / "backups")
+                    targets.update(game=game, mods=game / "mods", saves=game / "saves", screenshots=game / "screenshots", instance=directory, backups=directory / "backups")
                     if body.get("target") == "world":
                         world = safe_path(game / "saves", body.get("world", ""))
                         if not body.get("world") or not world.is_dir() or world.is_symlink():

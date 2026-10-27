@@ -6,6 +6,8 @@ import time
 import urllib.parse
 import uuid
 import zipfile
+import threading
+from contextlib import nullcontext
 from pathlib import Path
 
 from .core import Cancelled, LauncherError, atomic_json, extract_zip, read_json, request_json, safe_path, valid_id
@@ -14,6 +16,7 @@ from .github_source import GitHubSource
 from .ai_downloads import AIDownloads
 from .pack_session import pack_session
 from .mod_previews import ModPreviews
+from .faithful import FaithfulSource
 
 MODRINTH = "https://api.modrinth.com/v2"
 CURSEFORGE = "https://api.curseforge.com/v1"
@@ -28,6 +31,9 @@ class ContentManager:
         self.github = GitHubSource(self)
         self.ai_downloads = AIDownloads(self)
         self.previews = ModPreviews(self)
+        self.faithful = FaithfulSource(self)
+        self.operation_guard = lambda identifier: nullcontext()
+        self._writes = threading.local()
 
     def curse(self, path):
         key = self.store.config()["curseforge_key"]
@@ -36,10 +42,12 @@ class ContentManager:
         return request_json(CURSEFORGE + path, headers={"x-api-key": key})
 
     def search(self, query="", kind="mod", version="", loader="", offset=0, provider="modrinth", sort="downloads"):
-        if kind not in ("mod", "modpack", "resourcepack", "shader"):
+        if kind not in ("mod", "modpack", "resourcepack", "shader", "datapack", "map"):
             raise LauncherError("不支持的内容类型")
         if provider not in dict(sources(kind)):
             raise LauncherError("此内容平台不支持所选内容类型")
+        if provider == "faithful":
+            return self.faithful.search(query,version,offset)
         if provider == "github":
             from .github_source import repository
             if query.strip():
@@ -56,29 +64,33 @@ class ContentManager:
         if provider in ("atlauncher", "ftb", "mcmod"):
             return self.providers.search(provider, query, kind, offset, version, loader)
         if provider == "curseforge":
-            params = {"gameId": 432, "classId": {"mod": 6, "modpack": 4471, "resourcepack": 12, "shader": 6552}[kind],
+            params = {"gameId": 432, "classId": {"mod": 6, "modpack": 4471, "resourcepack": 12, "shader": 6552, "datapack": 6945, "map": 17}[kind],
                       "searchFilter": query, "index": offset, "pageSize": 18, "sortField": 6, "sortOrder": "desc"}
             if version:
                 params["gameVersion"] = version
-            if loader in ("forge", "fabric", "quilt", "neoforge"):
-                params["modLoaderType"] = {"forge": 1, "fabric": 4, "quilt": 5, "neoforge": 6}[loader]
+            if kind == "mod" and loader in ("forge", "fabric", "quilt", "neoforge", "cleanroom", "liteloader"):
+                loader = "forge" if loader == "cleanroom" else loader
+                params["modLoaderType"] = {"forge": 1, "fabric": 4, "quilt": 5, "neoforge": 6, "liteloader": 3}[loader]
             data = self.curse("/mods/search?" + urllib.parse.urlencode(params))
             hits = [{"project_id": str(p["id"]), "title": p["name"], "description": p["summary"], "slug": p["slug"],
                      "downloads": p["downloadCount"], "icon_url": (p.get("logo") or {}).get("thumbnailUrl", ""),
                      "author": ", ".join(a["name"] for a in p.get("authors", [])), "categories": [c["name"] for c in p.get("categories", [])],
                      "project_type": kind} for p in data["data"]]
             return {"hits": hits, "total_hits": data["pagination"]["totalCount"], "offset": offset}
-        facets = [["project_type:" + kind]]
+        facets = [["categories:datapack"]] if kind == "datapack" else [["project_type:" + kind]]
         if version:
             facets.append(["versions:" + version])
         if loader and loader != "vanilla" and kind == "mod":
-            facets.append(["categories:" + loader])
+            facets.append(["categories:" + ("forge" if loader == "cleanroom" else loader)])
         params = {"query": query, "facets": json.dumps(facets), "index": sort if sort in ("downloads", "relevance", "updated", "newest", "follows") else "downloads", "limit": 18, "offset": offset}
         return self.net.json(MODRINTH + "/search?" + urllib.parse.urlencode(params))
 
     def versions(self, project_id, instance_id="", kind="mod", provider="modrinth"):
         if provider not in dict(sources(kind)) or provider == "mcmod":
             raise LauncherError("此内容平台不提供自动安装")
+        if provider == "faithful":
+            instance = self.store.instance(instance_id) if instance_id else None
+            return self.faithful.versions(str(project_id),instance["game_version"] if instance else "")
         if provider == "github":
             return self.github.versions(project_id)
         if provider in ("atlauncher", "ftb"):
@@ -89,8 +101,8 @@ class ContentManager:
             params = {"pageSize": 50}
             if instance and kind != "modpack":
                 params["gameVersion"] = instance["game_version"]
-                if kind == "mod" and instance["loader"] != "vanilla":
-                    params["modLoaderType"] = {"forge": 1, "fabric": 4, "quilt": 5, "neoforge": 6}[instance["loader"]]
+                if kind == "mod" and instance["loader"] in ("forge", "fabric", "quilt", "neoforge", "cleanroom", "liteloader"):
+                    params["modLoaderType"] = {"forge": 1, "fabric": 4, "quilt": 5, "neoforge": 6, "cleanroom": 1, "liteloader": 3}[instance["loader"]]
             data = self.curse("/mods/{}/files?{}".format(project_id, urllib.parse.urlencode(params)))
             return [{"id": str(f["id"]), "name": f["displayName"], "version_number": f["fileName"],
                      "game_versions": f.get("gameVersions", []), "loaders": [], "date_published": f["fileDate"],
@@ -99,19 +111,30 @@ class ContentManager:
         if instance and kind != "modpack":
             params["game_versions"] = json.dumps([instance["game_version"]])
             if kind == "mod":
-                params["loaders"] = json.dumps([instance["loader"]])
+                params["loaders"] = json.dumps(["forge" if instance["loader"] == "cleanroom" else instance["loader"]])
+        if kind == "datapack":
+            params["loaders"] = json.dumps(["datapack"])
         suffix = "?" + urllib.parse.urlencode(params) if params else ""
         return self.net.json(MODRINTH + "/project/" + str(project_id) + "/version" + suffix)
 
-    def install_project(self, project_id, version_id, instance_id, kind, provider, task, allow_unknown=False):
+    def install_project(self, project_id, version_id, instance_id, kind, provider, task, allow_unknown=False, world=""):
+        if kind in ("datapack", "map"):
+            from .world_content import install
+            return install(self, project_id, version_id, instance_id, kind, provider, task, world)
         if kind == "modpack":
             with pack_session(self, task):
-                return self._install_project(project_id, version_id, instance_id, kind, provider, task, allow_unknown)
-        return self._install_project(project_id, version_id, instance_id, kind, provider, task, allow_unknown)
+                result = self._install_project(project_id, version_id, instance_id, kind, provider, task, allow_unknown)
+                from .pack_updates import remember
+                remember(self, result['instance_id'], task, {'pack_provider': provider, 'pack_project': str(project_id), 'pack_version': str(version_id)})
+                return result
+        with self.operation_guard(instance_id):
+            return self._install_project(project_id, version_id, instance_id, kind, provider, task, allow_unknown)
 
     def _install_project(self, project_id, version_id, instance_id, kind, provider, task, allow_unknown=False):
         if provider not in dict(sources(kind)) or provider == "mcmod":
             raise LauncherError("此内容平台不提供自动安装")
+        if provider == "faithful":
+            return self.faithful.install(str(project_id),str(version_id),instance_id,task)
         if provider == "github":
             return self.github.install(project_id, version_id, instance_id, task, allow_unknown)
         if provider in ("atlauncher", "ftb"):
@@ -147,7 +170,7 @@ class ContentManager:
         instance = self.store.instance(instance_id)
         if any(p["instance_id"] == instance_id and p["running"] for p in self.game.process_status()):
             raise LauncherError("请先关闭此实例的游戏再修改内容")
-        if kind == "mod" and instance["loader"] == "vanilla":
+        if kind == "mod" and instance["loader"] in ("vanilla", "optifine"):
             raise LauncherError("此实例是原版，请先创建 Fabric / Quilt / Forge / NeoForge 实例")
 
     def _folder(self, instance_id, kind):
@@ -168,14 +191,20 @@ class ContentManager:
         items.append(item)
         atomic_json(path, items)
 
+    def capture_write(self, instance_id, kind, filename):
+        journal = getattr(self._writes, 'journal', None)
+        if journal is not None and journal.identifier == instance_id and kind == 'mod':
+            journal.capture(['game/mods/' + filename])
+
     def _mr_install(self, version, instance_id, kind, task, seen):
         if version["id"] in seen:
             return
         seen.add(version["id"])
+        self._check_locked(instance_id, 'modrinth', str(version['project_id']), str(version['id']))
         instance = self.store.instance(instance_id)
         if instance["game_version"] not in version.get("game_versions", []):
             raise LauncherError("所选内容版本不支持此 Minecraft 版本")
-        if kind == "mod" and instance["loader"] not in version.get("loaders", []):
+        if kind == "mod" and ("forge" if instance["loader"] == "cleanroom" else instance["loader"]) not in version.get("loaders", []):
             raise LauncherError("所选模组与此实例的加载器不兼容")
         for dep in version.get("dependencies", []):
             if dep["dependency_type"] != "required":
@@ -195,6 +224,7 @@ class ContentManager:
         target = safe_path(self._folder(instance_id, kind), file["filename"])
         if Path(file["filename"]).name != file["filename"]:
             raise LauncherError("内容文件名不合法")
+        self.capture_write(instance_id, kind, file['filename'])
         self.net.download(file["url"], target, sha1=file.get("hashes", {}).get("sha1"), sha512=file.get("hashes", {}).get("sha512"), task=task, size=file.get("size"))
         self._record(instance_id, {"provider": "modrinth", "project_id": version["project_id"], "version_id": version["id"],
                                   "filename": file["filename"], "name": version["name"], "kind": kind, "installed": time.time()})
@@ -223,6 +253,7 @@ class ContentManager:
         if file["id"] in seen:
             return
         seen.add(file["id"])
+        self._check_locked(instance_id, 'curseforge', str(project_id), str(file['id']))
         for dep in file.get("dependencies", []):
             if dep["relationType"] != 3:
                 continue
@@ -235,25 +266,40 @@ class ContentManager:
         if Path(filename).name != filename:
             raise LauncherError("内容文件名不合法")
         task.update("安装内容 · " + filename, 50)
+        self.capture_write(instance_id, kind, filename)
         self._cf_download(file, safe_path(self._folder(instance_id, kind), filename), task, pack_instance=instance_id if pack else None)
         self._record(instance_id, {"provider": "curseforge", "project_id": str(project_id), "version_id": str(file["id"]),
                                   "filename": filename, "name": file["displayName"], "kind": kind, "installed": time.time()})
+
+    def _check_locked(self, instance_id, provider, project, version):
+        policy = read_json(self.store.instance_dir(instance_id) / 'content-policy.json', {}).get(provider + ':' + project, {})
+        if policy.get('locked'):
+            records = read_json(self.store.instance_dir(instance_id) / 'content.json', [])
+            if any(r.get('provider') == provider and str(r.get('project_id')) == project and str(r.get('version_id')) != version for r in records):
+                raise LauncherError('此模组已锁定版本，请先解除锁定：' + project)
 
     def list_local(self, instance_id):
         result = []
         records = read_json(self.store.instance_dir(instance_id) / "content.json", [])
         for kind in ("mod", "resourcepack", "shader"):
             for path in self._folder(instance_id, kind).glob("*"):
-                if path.is_file() and path.name.endswith((".jar", ".zip", ".disabled")):
+                if path.is_file() and path.name.endswith((".jar", ".litemod", ".zip", ".disabled")):
                     original = path.name[:-9] if path.name.endswith(".disabled") else path.name
                     record = next((r for r in records if r["filename"] == original), {})
                     item = dict(record, filename=path.name, kind=kind, size=path.stat().st_size, enabled=not path.name.endswith(".disabled"))
+                    from .management import policy_key
+                    policy = read_json(self.store.instance_dir(instance_id) / 'content-policy.json', {}).get(policy_key(item), {})
+                    item['update_locked'] = bool(policy.get('locked'))
                     if kind == "mod":
                         item.update(self.previews.local(path))
                     result.append(item)
         return result
 
     def toggle(self, instance_id, filename, kind, remove=False):
+        with self.operation_guard(instance_id):
+            return self._toggle(instance_id, filename, kind, remove)
+
+    def _toggle(self, instance_id, filename, kind, remove=False):
         self._check_mod_instance(instance_id, "resourcepack")
         if Path(filename).name != filename:
             raise LauncherError("无效的文件名")
@@ -268,6 +314,7 @@ class ContentManager:
             target = path.with_name(path.name[:-9] if path.name.endswith(".disabled") else path.name + ".disabled")
             if target.exists():
                 raise LauncherError("目标文件已存在")
+            self.capture_write(instance_id, kind, target.name)
             path.rename(target)
 
     def import_pack(self, archive, task):
@@ -333,7 +380,7 @@ class ContentManager:
                 index = metadata("manifest.json")
                 if index.get("manifestType") != "minecraftModpack" or index.get("manifestVersion") != 1:
                     raise LauncherError("不支持此 CurseForge 整合包格式")
-                if not self.store.config()["curseforge_key"]:
+                if index.get("files") and not self.store.config()["curseforge_key"]:
                     raise LauncherError("导入 CurseForge 整合包需要在设置中填写 API Key")
                 loaders = index.get("minecraft", {}).get("modLoaders", [])
                 loader_id = next((l["id"] for l in loaders if l.get("primary")), loaders[0]["id"] if loaders else "")
@@ -351,6 +398,8 @@ class ContentManager:
             elif "blockcraft.json" in names:
                 index = metadata("blockcraft.json")
                 instance = session.create(index["name"], index["game_version"], index["loader"], index.get("loader_version", ""))
+                if isinstance(index.get("window_title"), str):
+                    self.store.update_instance(instance["id"], {"window_title": index["window_title"][:200]})
                 self.store.update_instance(instance["id"], {"pack_install_pending": True})
                 self.game.install(instance["id"], task)
                 self.store.update_instance(instance["id"], {"ready": False})
@@ -359,33 +408,29 @@ class ContentManager:
                 raise LauncherError("请选择 Modrinth .mrpack、CurseForge .zip 或本启动器导出的整合包")
         task.check()
         self.store.update_instance(instance["id"], {"ready": True, "pack_install_pending": False})
+        from .pack_updates import remember
+        remember(self, instance['id'], task)
         return {"instance_id": instance["id"]}
 
-    def export_pack(self, instance_id, task):
-        instance = self.store.instance(instance_id)
-        self._check_mod_instance(instance_id, "resourcepack")
-        destination = self.store.root / "exports" / (instance_id + "-" + time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6] + ".zip")
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        task.update("导出模组与配置", 20)
-        game_dir = self.store.game_dir(instance_id)
-        with zipfile.ZipFile(destination, "w", zipfile.ZIP_DEFLATED) as zf:
-            zf.writestr("blockcraft.json", json.dumps({k: instance[k] for k in ("name", "game_version", "loader", "loader_version")}, ensure_ascii=False))
-            for folder in ("mods", "config", "resourcepacks", "shaderpacks", "defaultconfigs", "kubejs", "scripts"):
-                for path in (game_dir / folder).rglob("*"):
-                    task.check()
-                    if path.is_file() and not path.is_symlink():
-                        zf.write(str(path), "overrides/" + path.relative_to(game_dir).as_posix())
-        return {"path": str(destination), "filename": destination.name}
+    def export_pack(self, instance_id, task, options=None):
+        from .pack_export import export_pack
+        return export_pack(self, instance_id, task, options)
 
     def check_updates(self, instance_id):
         updates = []
+        from .management import policy_key
+        policies = read_json(self.store.instance_dir(instance_id) / 'content-policy.json', {})
         records = read_json(self.store.instance_dir(instance_id) / "content.json", [])
         for item in records:
+            policy = policies.get(policy_key(item), {})
+            if policy.get('locked'): continue
             if item["provider"] == "github":
                 continue  # Assets need an explicit choice and JAR inspection; never guess the matching variant.
-            if not safe_path(self._folder(instance_id, item["kind"]), item["filename"]).is_file():
+            enabled = safe_path(self._folder(instance_id, item["kind"]), item["filename"]).is_file()
+            disabled = safe_path(self._folder(instance_id, item["kind"]), item["filename"] + '.disabled').is_file()
+            if not enabled and not disabled:
                 continue
             versions = self.versions(item["project_id"], instance_id, item["kind"], item["provider"])
-            if versions and str(versions[0]["id"]) != str(item["version_id"]):
-                updates.append(dict(item, new_version=versions[0]["id"], new_name=versions[0]["name"]))
+            if versions and str(versions[0]["id"]) != str(item["version_id"]) and str(versions[0]['id']) != policy.get('ignored'):
+                updates.append(dict(item, filename=item['filename'] + ('.disabled' if not enabled else ''), new_version=versions[0]["id"], new_name=versions[0]["name"]))
         return updates

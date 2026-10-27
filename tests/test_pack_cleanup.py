@@ -7,7 +7,7 @@ import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
-from launcher.core import Cancelled, LauncherError, Task
+from launcher.core import Cancelled, LauncherError, Task, read_json
 from launcher.pack_session import pack_session
 from launcher.service import Application
 
@@ -60,6 +60,18 @@ class PackCleanupTests(unittest.TestCase):
         self.assert_cleaned()
         self.assertEqual(self.archive.read_bytes(), original)
         self.assertEqual(self.task.pack_install["status"], "failed")
+
+    def test_state_refresh_tolerates_instance_removed_after_directory_scan(self):
+        removed = self.app.game.create("Being cleaned", "1.21.1")
+        metadata = self.app.store.instance_dir(removed["id"]) / "instance.json"
+        def read_during_cleanup(path, default=None):
+            if Path(path) == metadata and metadata.exists():
+                metadata.unlink()
+            return read_json(path, default)
+        with patch("launcher.core.read_json", side_effect=read_during_cleanup):
+            state = self.app.state()
+        self.assertEqual([item["id"] for item in state["instances"]], [self.old["id"]])
+        self.assertEqual(self.world.read_bytes(), b"keep-world")
 
     def test_download_failure_and_cancellation_clean_the_new_instance(self):
         self.write_pack(file=True)

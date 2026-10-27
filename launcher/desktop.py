@@ -11,7 +11,7 @@ from shiboken6 import isValid
 
 from PySide6.QtCore import (QEasingCurve, QObject, QPoint, QRunnable, Qt, QThreadPool, QLocale,
                             QTimer, QUrl, Signal, QPropertyAnimation)
-from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont, QIcon, QImageReader, QPainter, QPalette, QPixmap, QPolygonF
+from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont, QIcon, QImage, QImageReader, QPainter, QPalette, QPixmap, QPolygonF
 from PySide6.QtWidgets import (QApplication, QButtonGroup, QRadioButton, QCheckBox, QComboBox, QDialog, QFileDialog,
                                QFrame, QGridLayout, QGraphicsOpacityEffect,
                                QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
@@ -42,10 +42,10 @@ from .widgets import Button, ElidedLabel, GlassFrame, NavigationSwitch, PageHost
 
 PAGES = [("home", "", "启动"), ("library", "", "版本选择"),
          ("install", "", "自动安装"), ("discover", "", "模组"),
-         ("downloads", "", "正在运行"), ("accounts", "", "账号管理"),
+         ("downloads", "", "正在运行"),
          ("settings", "", "设置"), ("about", "", "关于")]
-LOADERS = {"vanilla": "原版", "fabric": "Fabric", "quilt": "Quilt", "forge": "Forge", "neoforge": "NeoForge"}
-KINDS = {"mod": "模组", "modpack": "整合包", "resourcepack": "资源包", "shader": "光影"}
+LOADERS = {"vanilla": "原版", "fabric": "Fabric", "quilt": "Quilt", "forge": "Forge", "neoforge": "NeoForge", "optifine": "OptiFine", "cleanroom": "Cleanroom", "liteloader": "LiteLoader"}
+KINDS = {"mod": "模组", "modpack": "整合包", "resourcepack": "资源包", "shader": "光影", "datapack": "数据包", "map": "地图"}
 STATUS = {"queued": "等待中", "running": "进行中", "completed": "已完成", "failed": "失败", "cancelled": "已取消"}
 
 
@@ -85,6 +85,15 @@ def field(title, widget):
     layout.addWidget(label(tr(title), "fieldLabel"))
     layout.addWidget(widget)
     return container
+
+
+def faithful_links(window, credit=False):
+    from .faithful import AUTHOR, LICENSE, SITE
+    website = Button(tr("Faithful 官网"), lambda: window.open_content_url(SITE))
+    website.setObjectName("faithful-website")
+    license_button = Button(tr("许可"), lambda: window.open_content_url(LICENSE))
+    license_button.setObjectName("faithful-license")
+    return row(ElidedLabel(AUTHOR,"muted") if credit else None, website, license_button)
 
 
 def text_input(value="", placeholder="", name=""):
@@ -670,7 +679,7 @@ class LauncherWindow(LiveSettings, QMainWindow):
         header.addWidget(self.brand_label)
         header.addSpacing(15)
         self.navigation_switch = NavigationSwitch((("launch",tr("启动")),("download",tr("下载")),("settings",tr("设置")),("more",tr("更多"))))
-        self.navigation_switch.selected.connect(lambda key:self.navigate({"launch":"home","download":"install","settings":"settings","more":"accounts"}[key]))
+        self.navigation_switch.selected.connect(lambda key:self.navigate({"launch":"home","download":"install","settings":"settings","more":"downloads"}[key]))
         self.top_buttons = self.navigation_switch.buttons
         header.addWidget(self.navigation_switch)
         header.addStretch()
@@ -709,10 +718,11 @@ class LauncherWindow(LiveSettings, QMainWindow):
         self.instance_drafts = {}
 
     def section_for(self, page):
-        return "launch" if page in ("home", "library", "instance") else "download" if page in ("install", "discover") else "settings" if page == "settings" else "more"
+        return "launch" if page in ("home", "library", "instance") else "download" if page in ("install", "discover") else "settings" if page in ("settings", "accounts") else "more"
 
     def build_sidebar(self):
         clear_layout(self.side_layout)
+        self.side_layout.setSpacing(8 if self.page_id == "instance" else 12)
         self.nav_buttons = {}
         self.account_signature = None
         if self.page_id == "home":
@@ -722,8 +732,9 @@ class LauncherWindow(LiveSettings, QMainWindow):
             instance = self.service.store.instance(self.instance_id)
             self.side_layout.addWidget(Button(tr("← 返回启动"), lambda: self.navigate("home")))
             self.side_layout.addWidget(ElidedLabel(instance["name"], "section"))
-            for key, text in (("overview", tr("概览")), ("settings", tr("设置")), ("mods", tr("模组管理")), ("resourcepacks", tr("资源包")), ("shaders", tr("光影")), ("saves", tr("存档管理")), ("logs", tr("日志"))):
+            for key, text in (("overview", tr("概览")), ("settings", tr("设置")), ("mods", tr("模组管理")), ("resourcepacks", tr("资源包")), ("shaders", tr("光影")), ("saves", tr("存档管理")), ("screenshots", tr("截图")), ("logs", tr("日志"))):
                 button = Button(text, lambda checked=False, value=key: self.set_instance_category(value), self.instance_category == key)
+                button.setFixedHeight(34)
                 button.setObjectName("instance-" + key)
                 self.side_layout.addWidget(button)
             self.side_layout.addStretch()
@@ -752,17 +763,19 @@ class LauncherWindow(LiveSettings, QMainWindow):
             return
         if self.section_for(self.page_id) == "download":
             self.side_layout.addWidget(Button(tr("自动安装"), lambda: self.navigate("install"), self.page_id == "install"))
-            for key, text in (("modpack", tr("整合包")), ("mod", tr("模组")), ("resourcepack", tr("资源包")), ("shader", tr("光影"))):
+            for key, text in (("modpack", tr("整合包")), ("mod", tr("模组")), ("resourcepack", tr("资源包")), ("shader", tr("光影")), ("datapack", tr("数据包")), ("map", tr("地图"))):
                 self.side_layout.addWidget(Button(text, lambda checked=False, kind=key: self.explore(kind), self.page_id == "discover" and self.search_state["kind"] == key))
             self.side_layout.addStretch()
             self.side_layout.addWidget(Button(tr("导入整合包"), self.import_pack))
             return
         if self.page_id == "settings":
-            for key, text in (("game", tr("游戏")), ("download", tr("下载")), ("account", tr("账户")), ("appearance", tr("外观")), ("ai", tr("智能排查")), ("advanced", tr("高级"))):
-                self.side_layout.addWidget(Button(text, lambda checked=False, value=key: self.set_settings_category(value), self.settings_category == key))
+            for key, text in (("game", tr("游戏")), ("download", tr("下载")), ("account", tr("账号管理")), ("appearance", tr("外观")), ("ai", tr("智能排查")), ("advanced", tr("高级"))):
+                button = Button(text, lambda checked=False, value=key: self.set_settings_category(value), self.settings_category == key)
+                button.setObjectName("settings-" + key)
+                self.side_layout.addWidget(button)
             self.side_layout.addStretch()
             return
-        for key, text in (("accounts", tr("账号管理")), ("downloads", tr("正在运行")), ("about", tr("关于"))):
+        for key, text in (("downloads", tr("正在运行")), ("about", tr("关于"))):
             button = Button(text, lambda checked=False, page=key: self.navigate(page), self.page_id == key)
             button.setObjectName("side-" + key)
             self.nav_buttons[key] = button
@@ -796,7 +809,7 @@ class LauncherWindow(LiveSettings, QMainWindow):
         self.side_layout.addWidget(self.wam_login_button)
         self.skin_button = Button(tr("离线皮肤"),self.edit_current_skin)
         self.skin_button.setObjectName("offline-skin")
-        self.side_layout.addLayout(row(Button(tr("账号管理"), lambda: self.navigate("accounts")),self.skin_button))
+        self.side_layout.addLayout(row(Button(tr("账号管理"), lambda: self.set_settings_category("account")),self.skin_button))
         self.side_layout.addStretch(2)
         self.selected_label = label("", "muted", True)
         self.selected_label.setAlignment(Qt.AlignCenter)
@@ -1014,6 +1027,9 @@ class LauncherWindow(LiveSettings, QMainWindow):
         QTimer.singleShot(8000 if error else 4000, lambda: current.hide() if isValid(current) and current.isVisible() else None)
 
     def navigate(self, page_id, animated=True):
+        if page_id == "accounts":
+            page_id = "settings"
+            self.settings_category = "account"
         for dropdown in self.findChildren(GlassComboBox):
             if dropdown.popup.isVisible():
                 dropdown.hidePopup()
@@ -1029,7 +1045,7 @@ class LauncherWindow(LiveSettings, QMainWindow):
         order = [key for key, _, _ in PAGES] + ["instance"]
         direction = -1 if order.index(page_id) < order.index(previous) else 1
         if vertical:
-            categories = ["game", "download", "account", "appearance", "ai", "advanced"] if page_id == "settings" else ["overview", "settings", "mods", "resourcepacks", "shaders", "saves", "logs"] if page_id == "instance" else list(KINDS)
+            categories = ["game", "download", "account", "appearance", "ai", "advanced"] if page_id == "settings" else ["overview", "settings", "mods", "resourcepacks", "shaders", "saves", "screenshots", "logs"] if page_id == "instance" else list(KINDS)
             direction = -1 if previous_category in categories and categories.index(category) < categories.index(previous_category) else 1
         self.navigation_key = (page_id, category)
         self.page_id = page_id
@@ -1105,7 +1121,7 @@ class LauncherWindow(LiveSettings, QMainWindow):
             self.instance_signature = signature
             if self.page_id == "downloads" and hasattr(self, "task_rows"):
                 self.update_tasks()
-            elif changed and self.page_id in ("library", "accounts"):
+            elif changed and (self.page_id == "library" or (self.page_id == "settings" and self.settings_category == "account")):
                 self.navigate(self.page_id, False)
             for task in self.data["tasks"]:
                 for result in task.get("recovery_results", []):
@@ -1204,11 +1220,17 @@ class LauncherWindow(LiveSettings, QMainWindow):
         self.filter_library()
 
     def page_install(self, layout):
+        # The list owns scrolling; keep the page actions within the viewport.
+        layout.setAlignment(Qt.AlignmentFlag(0))
+        self.page.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         if getattr(self, "install_version", None):
             version = self.install_version
-            self.intro(layout, tr("安装 ") + version, actions=[Button(tr("← 重新选择原版"), self.reset_install_version)])
             self.install_form = InstallForm(self, version, parent=self.page.body)
-            layout.addWidget(self.install_form)
+            self.install_reselect = Button(tr("← 重新选择原版"), self.reset_install_version)
+            self.install_reselect.setObjectName("install-reselect")
+            layout.addLayout(row(ElidedLabel(tr("安装 ") + version, "section"),
+                                 self.install_reselect, self.install_form.submit))
+            layout.addWidget(self.install_form, 1)
             return
         self.intro(layout, tr("自动安装"))
         self.install_query = text_input(placeholder=tr("搜索版本"), name="download-version-search")
@@ -1216,7 +1238,8 @@ class LauncherWindow(LiveSettings, QMainWindow):
         layout.addLayout(row(self.install_query, self.install_type))
         self.install_list = QListWidget()
         self.install_list.setObjectName("download-versions")
-        self.install_list.setMinimumHeight(360)
+        self.install_list.setMinimumHeight(160)
+        self.install_list.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.install_list.setVerticalScrollMode(QListWidget.ScrollPerPixel)
         layout.addWidget(self.install_list, 1)
         self.install_next = Button(tr("继续"), self.install_selected, True)
@@ -1226,17 +1249,20 @@ class LauncherWindow(LiveSettings, QMainWindow):
         self.install_list.currentItemChanged.connect(lambda current, previous: self.install_next.setEnabled(current is not None))
         self.install_query.textChanged.connect(self.filter_install_versions)
         self.install_type.currentIndexChanged.connect(self.filter_install_versions)
-        self.install_status = label(tr("加载中…"), "muted")
+        self.install_status = label(tr("加载中…"), "muted", True)
+        self.install_status.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.install_status.setMaximumHeight(48)
         layout.addWidget(self.install_status)
+        page, status = self.page, self.install_status
         def received(data):
             self.manifest_cache = data
-            if self.page_id == "install":
-                self.install_status.hide()
+            if self.page is page and isValid(status):
+                status.hide()
                 self.filter_install_versions()
-        self.request("manifest", success=received, error=lambda message: self.install_status.setText(tr(message)) if self.page_id == "install" else None)
+        self.request("manifest", success=received, error=lambda message: status.setText(tr(message)) if self.page is page and isValid(status) else None)
 
     def filter_install_versions(self):
-        if self.page_id != "install" or not getattr(self, "manifest_cache", None):
+        if self.page_id != "install" or getattr(self, "install_version", None) or not getattr(self, "manifest_cache", None):
             return
         self.install_list.clear()
         for version in self.manifest_cache["versions"]:
@@ -1301,7 +1327,7 @@ class LauncherWindow(LiveSettings, QMainWindow):
                 self.navigate("library", False)
         self.request("folders/select", {"path": selected}, selected_folder)
 
-    def page_accounts(self, layout):
+    def account_management(self, layout):
         download = Button(tr("下载玩家皮肤"),lambda:self.open_player_skin())
         download.setObjectName("download-player-skin")
         self.intro(layout, tr("账号管理"), actions=[Button(tr("添加离线账号"), self.add_offline), Button(tr("正版登录"), self.microsoft_login, True)])
@@ -1359,9 +1385,10 @@ class LauncherWindow(LiveSettings, QMainWindow):
             self.recovery_dialog = None
         if pending and self.recovery_dialog is None:
             from .recovery_ui import RecoveryDialog
+            from .management_ui import PackReviewDialog
             if self.background_mode:
                 self.restore_window()
-            dialog = RecoveryDialog(self, pending)
+            dialog = PackReviewDialog(self, pending) if pending['interaction']['kind'] == 'pack_upgrade' else RecoveryDialog(self, pending)
             self.recovery_dialog = dialog
             dialog.finished.connect(lambda _: setattr(self, "recovery_dialog", None) if self.recovery_dialog is dialog else None)
             self.open_dialog(dialog)
@@ -1515,6 +1542,8 @@ class LauncherWindow(LiveSettings, QMainWindow):
             if self.page_id != "discover" or generation != self.project_search_generation:
                 return
             clear_layout(self.content_result_layout)
+            if state["provider"] == "faithful":
+                self.content_result_layout.addLayout(faithful_links(self,credit=True))
             if data.get("notice"):
                 self.content_result_layout.addWidget(label(tr(data["notice"]), "muted", True))
             if data.get("external_search_url"):
@@ -1577,7 +1606,8 @@ class LauncherWindow(LiveSettings, QMainWindow):
     def page_settings(self, layout):
         config = self.settings_draft
         category = self.settings_category
-        self.intro(layout, {"game": tr("游戏"), "download": tr("下载"), "account": tr("账户"), "appearance": tr("外观"), "ai":tr("智能排查"), "advanced": tr("高级")}[category])
+        if category != "account":
+            self.intro(layout, {"game": tr("游戏"), "download": tr("下载"), "appearance": tr("外观"), "ai":tr("智能排查"), "advanced": tr("高级")}[category])
         self.settings_fields = {}
         section, box = card()
         if category != "game":
@@ -1612,6 +1642,7 @@ class LauncherWindow(LiveSettings, QMainWindow):
         self.java_auto = QCheckBox(tr("自动匹配与下载 Java（Eclipse Temurin）"))
         self.java_auto.setChecked(config["java_auto"])
         box.addWidget(self.java_auto)
+        box.addWidget(Button(tr('Java 管理中心'), lambda: self.open_management('java')))
         dimensions = QHBoxLayout()
         for key, title, low, high in (("width", tr("游戏窗口宽度"), 640, 7680), ("height", tr("游戏窗口高度"), 480, 4320)):
             widget = QSpinBox()
@@ -1649,14 +1680,8 @@ class LauncherWindow(LiveSettings, QMainWindow):
         key.setText(config.get("curseforge_key", ""))
         self.settings_fields["curseforge_key"] = key
         box.addWidget(field("CurseForge API Key", key))
-        section, box = card()
-        if category != "account":
-            section.setParent(self.page)
-            section.hide()
-        else:
-            layout.addWidget(section)
-        box.addWidget(label("Windows Web Account Manager", "fieldLabel"))
-        box.addWidget(Button(tr("账号管理"), lambda: self.navigate("accounts")))
+        if category == "account":
+            self.account_management(layout)
         section, box = card()
         if category != "appearance":
             section.setParent(self.page)
@@ -1915,6 +1940,11 @@ class LauncherWindow(LiveSettings, QMainWindow):
                 self.toast(tr("未检测到 Java，可启用自动下载"))
         self.request("java", success=found)
 
+    def open_management(self, kind, identifier=None):
+        from .management_ui import BulkModsDialog, DependencyDialog, JavaDialog, HistoryDialog, PackUpgradeDialog
+        dialog_type = {'bulk': BulkModsDialog, 'dependencies': DependencyDialog, 'java': JavaDialog, 'history': HistoryDialog, 'upgrade': PackUpgradeDialog}[kind]
+        return self.open_dialog(dialog_type(self, identifier))
+
     def open_dialog(self, dialog):
         self.dialogs.append(dialog)
         dialog.finished.connect(lambda _: self.dialogs.remove(dialog) if dialog in self.dialogs else None)
@@ -1947,7 +1977,7 @@ class LauncherWindow(LiveSettings, QMainWindow):
 
     def delete_account(self, account_id):
         if QMessageBox.question(self, tr("移除账号"), tr("移除此账号？以后仍可重新登录。")) == QMessageBox.Yes:
-            self.mutate("accounts/delete", {"id": account_id}, lambda _: self.navigate("accounts"))
+            self.mutate("accounts/delete", {"id": account_id}, lambda _: self.set_settings_category("account"))
 
     def microsoft_login(self):
         self.open_dialog(MicrosoftDialog(self))
@@ -2333,17 +2363,23 @@ class InstallForm(QWidget):
         self.setObjectName("install-options")
         box = QVBoxLayout(self)
         box.setContentsMargins(0, 0, 0, 0)
-        box.setSpacing(12)
+        box.setSpacing(16)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.options_scroll = SmoothScroll(self)
+        self.options_scroll.setObjectName("loader-options-scroll")
+        self.options_scroll.layout.setContentsMargins(0, 0, 10, 0)
+        self.options_scroll.layout.setSpacing(12)
+        box.addWidget(self.options_scroll, 1)
         self.name = text_input(placeholder=version, name="instance-name")
-        box.addWidget(field(tr("版本名称"), self.name))
+        self.options_scroll.layout.addWidget(field(tr("版本名称"), self.name))
         self.group = QButtonGroup(self)
-        choices = QGridLayout()
+        choices = self.choices = QGridLayout()
+        self.loader_frames = []
+        self.grid_columns = 0
         choices.setHorizontalSpacing(12)
         choices.setVerticalSpacing(12)
-        choices.setColumnStretch(0, 1)
-        choices.setColumnStretch(1, 1)
-        box.addLayout(choices)
-        for index, loader in enumerate(("vanilla", "forge", "neoforge", "fabric", "quilt")):
+        self.options_scroll.layout.addLayout(choices)
+        for loader in ("vanilla", "forge", "neoforge", "fabric", "quilt", "optifine", "cleanroom", "liteloader"):
             frame, content = card()
             content.setContentsMargins(16, 12, 16, 12)
             content.setSpacing(6)
@@ -2352,7 +2388,7 @@ class InstallForm(QWidget):
             self.group.addButton(radio)
             radio.setChecked(loader == "vanilla")
             radio.setEnabled(loader == "vanilla")
-            status = label(tr("不安装加载器") if loader == "vanilla" else tr("正在获取兼容版本…"), "muted")
+            status = ElidedLabel(tr("不安装加载器") if loader == "vanilla" else tr("正在获取兼容版本…"), "muted")
             versions = combo([], name="loader-versions-" + loader)
             versions.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             versions.setMinimumWidth(0)
@@ -2362,37 +2398,58 @@ class InstallForm(QWidget):
                 versions.hide()
             retry = Button(tr("重试"), lambda checked=False, key=loader: self.fetch_loader(key))
             retry.setFixedWidth(65)
+            retry_policy = retry.sizePolicy()
+            retry_policy.setRetainSizeWhenHidden(loader != "vanilla")
+            retry.setSizePolicy(retry_policy)
             retry.hide()
             content.addLayout(row(radio, None, retry))
             content.addWidget(status)
             if loader != "vanilla":
                 content.addWidget(versions)
-            if index == 0:
-                choices.addWidget(frame, 0, 0, 1, 2)
-            else:
-                choices.addWidget(frame, 1 + (index-1)//2, (index-1)%2)
+            self.loader_frames.append(frame)
             self.rows[loader] = {"radio": radio, "versions": versions, "status": status, "retry": retry}
             radio.toggled.connect(lambda checked, key=loader: self.choose_loader(key) if checked else None)
             versions.activated.connect(lambda index, key=loader: self.rows[key]["radio"].setChecked(True))
+        # The containing page places this button in its fixed header.
+        self.submit = Button(tr("↓ 安装游戏"), self.install, True, parent=self)
+        self.submit.setObjectName("install-submit")
         self.destination = ElidedLabel(str(window.service.store.minecraft_root), "muted")
-        box.addWidget(self.destination)
+        self.options_scroll.layout.addWidget(self.destination)
         self.error_label = label("", "muted", True)
+        self.error_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.error_label.setStyleSheet("color:" + theme_color("danger").name())
         self.error_label.hide()
-        box.addWidget(self.error_label)
-        self.submit = Button(tr("↓ 安装游戏"), self.install, True)
-        self.submit.setObjectName("install-submit")
-        box.addWidget(self.submit)
+        self.options_scroll.layout.insertWidget(0, self.error_label)
         if not window.service.store.minecraft_root.is_dir():
             self.error(tr("请先在版本选择中创建 .minecraft 文件夹"))
-            box.addWidget(Button(tr("前往版本选择"), lambda: window.navigate("library")))
+            self.options_scroll.layout.insertWidget(1, Button(tr("前往版本选择"), lambda: window.navigate("library")))
+        self.reflow_loaders()
         self.update_submit()
-        for loader in ("forge", "neoforge", "fabric", "quilt"):
+        for loader in ("forge", "neoforge", "fabric", "quilt", "optifine", "cleanroom", "liteloader"):
             self.fetch_loader(loader)
 
     def choose_loader(self, loader):
         self.selected_loader = loader
         self.update_submit()
+
+    def reflow_loaders(self):
+        columns = 2 if self.width() >= 470 else 1
+        if columns == self.grid_columns:
+            return
+        self.grid_columns = columns
+        while self.choices.count():
+            self.choices.takeAt(0)
+        self.choices.setColumnStretch(0, 1)
+        self.choices.setColumnStretch(1, 1 if columns == 2 else 0)
+        for index, frame in enumerate(self.loader_frames):
+            if index == 0:
+                self.choices.addWidget(frame, 0, 0, 1, columns)
+            else:
+                self.choices.addWidget(frame, 1 + (index-1)//columns, (index-1)%columns)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.reflow_loaders()
 
     def update_submit(self):
         available = self.selected_loader == "vanilla" or self.rows[self.selected_loader]["versions"].count() > 0
@@ -2401,9 +2458,15 @@ class InstallForm(QWidget):
     def error(self, message):
         self.error_label.setText(tr(message))
         self.error_label.setVisible(bool(message))
+        if message:
+            self.options_scroll.ensureWidgetVisible(self.error_label)
 
     def fetch_loader(self, loader):
         entry = self.rows[loader]
+        # Hiding a focused button otherwise advances focus to another card,
+        # which QScrollArea automatically scrolls into view.
+        if entry["retry"].hasFocus():
+            self.options_scroll.setFocus(Qt.OtherFocusReason)
         entry["retry"].hide()
         entry["versions"].clear()
         self.update_submit()
@@ -2463,7 +2526,10 @@ class InstallDialog(NativeDialog):
             return
         self.preselected = version
         self.form = InstallForm(window, version, self, lambda result: (self.accept(), self.form.finished(result)))
-        self.body.addWidget(self.form)
+        self.body.setAlignment(Qt.AlignmentFlag(0))
+        self.scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.body.addLayout(row(None, self.form.submit))
+        self.body.addWidget(self.form, 1)
         self.submit = self.form.submit
         area = window.screen().availableGeometry()
         self.resize(min(740, area.width()), min(760, area.height()-30))
@@ -2540,6 +2606,8 @@ class ProjectDialog(NativeDialog):
         details.addWidget(ElidedLabel(project.get("author", ""), "muted"))
         description = SummaryLabel(project.get("description", ""), 3)
         details.addWidget(description)
+        if state["provider"] == "faithful":
+            details.addLayout(faithful_links(window))
         if state["provider"] == "github":
             details.addWidget(label(tr("安装前检查模组元数据；前置模组需要另外安装。"), "muted", True))
         if state["provider"] in ("atlauncher", "ftb", "github") and project.get("project_url"):
@@ -2563,12 +2631,26 @@ class ProjectDialog(NativeDialog):
             self.target.setParent(self)
             self.target.hide()
         self.generation = 0
+        self.world = None
+        if state["kind"] == "datapack":
+            self.world = combo([], name="datapack-world")
+            self.body.insertWidget(3, field(tr("目标存档"), self.world))
         self.load_versions()
 
     def load_versions(self):
         self.generation += 1
         generation = self.generation
         clear_layout(self.container)
+        if self.world is not None:
+            self.world.clear()
+            def received_worlds(items):
+                if self.isVisible() and generation == self.generation:
+                    for item in items:
+                        self.world.addItem(item["name"], item["id"])
+                    if not items:
+                        self.error(tr("请先在游戏中创建存档，再安装数据包"))
+            if self.target.currentData():
+                self.window.request("worlds?" + urllib.parse.urlencode({"instance": self.target.currentData()}), success=received_worlds, error=self.error)
         self.container.addWidget(label(tr("正在获取版本列表…"), "muted"))
         params = {"project": str(self.project["project_id"]), "instance": self.target.currentData() or "" if self.state["kind"] != "modpack" else "", "kind": self.state["kind"], "provider": self.state["provider"]}
         def received(versions):
@@ -2594,6 +2676,11 @@ class ProjectDialog(NativeDialog):
             return
         payload = {"project": str(self.project["project_id"]), "version": str(version["id"]), "instance": instance,
                    "kind": self.state["kind"], "provider": self.state["provider"]}
+        if self.world is not None:
+            if not self.world.currentData():
+                self.error(tr("请选择目标存档"))
+                return
+            payload["world"] = self.world.currentData()
         if self.state["provider"] == "github":
             payload["allow_unknown"] = self.github_allow_unknown.isChecked()
         self.window.mutate("content/install", payload, lambda _: self.accept(), show_tasks=True)
@@ -2609,7 +2696,7 @@ class InstancePanel(QWidget):
         self.panel = QVBoxLayout(self)
         self.panel.setContentsMargins(0, 0, 0, 0)
         self.panel.setSpacing(18)
-        title = {"overview": tr("版本概览"), "settings": tr("版本设置"), "mods": tr("模组管理"), "resourcepacks": tr("资源包"), "shaders": tr("光影"), "saves": tr("存档管理"), "logs": tr("日志")}[category]
+        title = {"overview": tr("版本概览"), "settings": tr("版本设置"), "mods": tr("模组管理"), "resourcepacks": tr("资源包"), "shaders": tr("光影"), "saves": tr("存档管理"), "screenshots": tr("截图"), "logs": tr("日志")}[category]
         self.panel.addWidget(label(title, "section"))
         self.error_label = label("", "muted", True)
         self.error_label.setStyleSheet("color:" + theme_color("danger").name())
@@ -2642,7 +2729,13 @@ class InstancePanel(QWidget):
         if not i.get("external_minecraft"):
             actions.append(Button(tr("复制版本"), lambda: self.task("instances/duplicate")))
         self.panel.addLayout(row(*actions))
-        self.panel.addLayout(row(Button(tr("导出整合包"), lambda: self.task("pack/export", {"instance": self.instance_id})), None, Button(tr("移除列表记录") if i.get("external_minecraft") else tr("删除版本"), self.delete, danger=True)))
+        self.panel.addLayout(row(Button(tr("导出整合包"), self.export_pack), None, Button(tr("移除列表记录") if i.get("external_minecraft") else tr("删除版本"), self.delete, danger=True)))
+        self.panel.addLayout(row(Button(tr('升级整合包'), lambda: self.window.open_management('upgrade', self.instance_id)),
+                                 Button(tr('变更记录'), lambda: self.window.open_management('history', self.instance_id))))
+
+    def export_pack(self):
+        from .instance_ui import PackExportDialog
+        self.window.open_dialog(PackExportDialog(self.window, self.instance_id))
 
     def delete(self):
         instance = self.window.service.store.instance(self.instance_id)
@@ -2679,6 +2772,8 @@ class InstancePanel(QWidget):
             self.mod_status_switch.selected.connect(self.set_mod_status)
             self.mod_status_switch.select("all", False)
             self.panel.addLayout(row(self.mod_status_switch, None))
+            self.panel.addLayout(row(Button(tr('批量管理'), lambda: self.window.open_management('bulk', self.instance_id)),
+                                     Button(tr('依赖关系与修复'), lambda: self.window.open_management('dependencies', self.instance_id))))
         self.panel.addLayout(row(Button(tr("导入"), self.import_local), Button(tr("检查更新"), self.check_updates), Button(tr("下载") + tr(KINDS[self.content_kind]), lambda: self.window.explore(self.content_kind, self.instance_id), True)))
         self.local_items = []
         self.local_cards = None
@@ -2784,7 +2879,7 @@ class InstancePanel(QWidget):
 
     def import_local(self):
         kind = self.content_kind
-        path, _ = QFileDialog.getOpenFileName(self, tr("导入 ") + tr(KINDS[kind]), "", tr("模组 (*.jar)") if kind == "mod" else tr("资源文件 (*.zip)"))
+        path, _ = QFileDialog.getOpenFileName(self, tr("导入 ") + tr(KINDS[kind]), "", tr("模组 (*.jar *.litemod)") if kind == "mod" else tr("资源文件 (*.zip)"))
         if not path:
             return
         def copy(task):
@@ -2794,10 +2889,14 @@ class InstancePanel(QWidget):
                 raise LauncherError(tr("目标实例中已有同名文件"))
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(path, str(destination))
-        self.window.service.tasks.submit(tr("导入本地内容"), copy)
+        self.window.service.tasks.submit(tr("导入本地内容"), lambda task: self.window.service.management.run(self.instance_id, copy, task))
         self.window.refresh()
 
     def check_updates(self):
+        if self.content_kind == 'mod':
+            from .management_ui import BulkModsDialog
+            self.window.open_dialog(BulkModsDialog(self.window, self.instance_id, update=True))
+            return
         self.error(tr("正在检查更新…"))
         def received(items):
             if not self.active():
@@ -2817,19 +2916,9 @@ class InstancePanel(QWidget):
         self.window.request("content/updates?instance=" + self.instance_id, success=received, error=self.error)
 
     def tab_logs(self):
-        self.log_type = combo([("game", tr("游戏启动日志")), ("installer", tr("加载器安装日志"))])
-        self.log_type.currentIndexChanged.connect(self.load_log)
-        self.panel.addLayout(row(self.log_type, Button(tr("刷新"), self.load_log), Button(tr("打开目录"), lambda: self.folder("instance")),Button(tr("分析崩溃"),lambda:self.window.run_diagnostic(self.instance_id,"crash"))))
-        self.log = QPlainTextEdit()
-        self.log.setReadOnly(True)
-        self.log.setMinimumHeight(280)
-        self.log.setFont(QFont("Consolas", 10))
-        self.panel.addWidget(self.log)
-        QTimer.singleShot(0, self.load_log)
-
-    def load_log(self):
-        self.window.request("log?" + urllib.parse.urlencode({"instance": self.instance_id, "type": self.log_type.currentData()}), success=lambda data: self.log.setPlainText(data["text"]) if self.active() and self.category == "logs" else None, error=self.error)
-
+        from .management_ui import LogPanel
+        self.panel.addWidget(LogPanel(self))
+        self.panel.addWidget(Button(tr('分析崩溃'), lambda: self.window.run_diagnostic(self.instance_id, 'crash')))
     def tab_saves(self):
         self.panel.addLayout(row(Button(tr("存档目录"), lambda: self.folder("saves")), Button(tr("备份目录"), lambda: self.folder("backups")), Button(tr("备份世界"), lambda: self.window.mutate("backup", {"instance": self.instance_id}), True)))
         try:
@@ -2861,14 +2950,23 @@ class InstancePanel(QWidget):
                 self.backups.addWidget(label(tr("暂无备份"), "muted"))
         self.window.request("backups?instance=" + self.instance_id, success=received, error=self.error)
 
+    def tab_screenshots(self):
+        from .instance_ui import ScreenshotsPanel
+        self.panel.addWidget(ScreenshotsPanel(self.window, self.instance_id))
+
     def tab_settings(self):
+        self.panel.addWidget(Button(tr("查看截图"), lambda: self.window.set_instance_category("screenshots")))
+        self.panel.addWidget(Button(tr('Java 管理中心'), lambda: self.window.open_management('java', self.instance_id)))
         current = self.window.service.store.instance(self.instance_id)
         current.update(self.window.instance_drafts.get(self.instance_id, {}))
         self.instance_fields = {}
-        for key, text in (("name", tr("实例名称")), ("java_path", tr("Java 路径（留空继承全局）")), ("jvm_args", tr("额外 JVM 参数")), ("game_args", tr("额外游戏参数"))):
+        for key, text in (("name", tr("实例名称")), ("window_title", tr("游戏窗口标题")), ("java_path", tr("Java 路径（留空继承全局）")), ("jvm_args", tr("额外 JVM 参数")), ("game_args", tr("额外游戏参数"))):
             widget = text_input(current.get(key, ""))
             self.instance_fields[key] = widget
             self.panel.addWidget(field(text, widget))
+            if key == "window_title":
+                widget.setMaxLength(200)
+                widget.setPlaceholderText(tr("留空使用默认标题；支持 {name}、{version}、{player}"))
         memory = QSpinBox()
         memory.setRange(512, 65536)
         memory.setValue(current.get("memory") or 4096)
@@ -2879,6 +2977,8 @@ class InstancePanel(QWidget):
         memory.setEnabled(mode.currentData() == "manual")
         self.panel.addWidget(field(tr("内存分配"), mode))
         self.panel.addWidget(field(tr("手动内存 / MB"), memory))
+        from .instance_ui import add_launch_options
+        add_launch_options(self,current)
         for widget in self.instance_fields.values():
             if isinstance(widget,QLineEdit):
                 widget.textChanged.connect(lambda _=None:self.changed(350))
@@ -2886,11 +2986,13 @@ class InstancePanel(QWidget):
             elif isinstance(widget,QSpinBox):
                 widget.setKeyboardTracking(False)
                 widget.valueChanged.connect(lambda _=None:self.changed())
+            elif isinstance(widget,QCheckBox):
+                widget.toggled.connect(lambda _=None:self.changed())
             else:
                 widget.currentIndexChanged.connect(lambda _=None:self.changed())
 
     def settings_values(self):
-        values = {key: value.currentData() if isinstance(value, QComboBox) else value.value() if isinstance(value, QSpinBox) else value.text() for key, value in self.instance_fields.items()}
+        values = {key: value.currentData() if isinstance(value, QComboBox) else value.value() if isinstance(value, QSpinBox) else value.isChecked() if isinstance(value,QCheckBox) else value.text() for key, value in self.instance_fields.items()}
         if values["memory_mode"] != "manual":
             values["memory"] = 0
         return values

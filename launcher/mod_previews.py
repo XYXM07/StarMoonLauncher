@@ -21,7 +21,7 @@ class ModPreviews:
         self.cache, self.projects, self.lock = {}, {}, threading.RLock()
 
     def local(self, path):
-        result = {"mod_name": "", "mod_id": "", "description": "", "image_path": "", "websites": []}
+        result = {"mod_name": "", "mod_id": "", "mod_version": "", "description": "", "image_path": "", "websites": []}
         try:
             path = Path(path)
             info = path.stat()
@@ -42,11 +42,14 @@ class ModPreviews:
                     return archive.read(entry)
                 names = set(archive.namelist())
                 icons, metadata = [], []
+                if "litemod.json" in names:
+                    lite = json.loads(read("litemod.json").decode("utf-8-sig"))
+                    metadata.append(dict(lite, name=lite.get("displayName") or lite.get("name", "")))
                 if "fabric.mod.json" in names:
                     metadata.append(json.loads(read("fabric.mod.json").decode("utf-8-sig")))
                 if "quilt.mod.json" in names:
                     quilt = json.loads(read("quilt.mod.json").decode("utf-8-sig")).get("quilt_loader", {})
-                    metadata.append(dict(quilt.get("metadata", {}), id=quilt.get("id", "")))
+                    metadata.append(dict(quilt.get("metadata", {}), id=quilt.get("id", ""), version=quilt.get('version', '')))
                 for name in ("META-INF/neoforge.mods.toml", "META-INF/mods.toml"):
                     if name in names:
                         import tomli
@@ -60,6 +63,8 @@ class ModPreviews:
                         metadata.append(dict(mod, icon=mod.get("logoFile", "")))
                 for data in metadata:
                     result["mod_name"] = result["mod_name"] or plain(data.get("name"), 160)
+                    version = str(data.get('version') or '')
+                    if not result['mod_version'] and '${' not in version: result['mod_version'] = version[:100]
                     identifier = str(data.get("id") or data.get("modId") or data.get("modid") or "")
                     if not result["mod_id"] and re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", identifier):
                         result["mod_id"] = identifier

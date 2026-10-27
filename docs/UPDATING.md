@@ -12,9 +12,9 @@
 
 ## 后续发布需要
 
-1. 在 `launcher/__init__.py` 提升 `__version__`，例如 `0.7.7`，构建对应单文件 EXE。
-2. 创建正式 Release，标签例如 `v0.7.7`。
-3. 附件使用固定名称 `StarMoonLauncher-0.7.7-windows-x64.exe`。
+1. 在 `launcher/__init__.py` 提升 `__version__`，例如 `0.7.8`，构建对应单文件 EXE。
+2. 创建正式 Release，标签例如 `v0.7.8`。
+3. 附件使用固定名称 `StarMoonLauncher-0.7.8-windows-x64.exe`。
 4. GitHub 的附件 `digest` 提供 SHA-256；若附件没有该字段，须同时上传 `SHA256SUMS.txt`，每行格式为 `64位SHA256  完整文件名`。
 
 旧的公开版 0.7.5 尚不具备自动更新功能，需要先手动下载 0.7.6，完全退出旧版后在原便携目录运行，保留已有 `data/` 和游戏文件夹。0.7.6 会检查后续更高版本；当前已是最新版时不会重复更新。
@@ -22,7 +22,7 @@
 ## 隔离验收
 
 ```powershell
-python tests/verify_updates.py dist/StarMoonLauncher-0.7.6-windows-x64.exe --candidate dist/StarMoonLauncher-0.7.7-windows-x64.exe
+python tests/verify_updates.py dist/StarMoonLauncher-0.7.7-windows-x64.exe --candidate dist/StarMoonLauncher-0.7.8-windows-x64.exe
 ```
 
 验收只复制并运行 `test-results/` 中自己的 EXE，模拟更新元数据，验证真实辅助进程等待、替换、备份、重新启动与数据保持。可用 `--candidate 新版.exe` 验证不同构建间的替换；候选程序版本应与当前源码一致。它不会替换开发者日常使用的 EXE，测试元数据不表示未来版本已经发布。
