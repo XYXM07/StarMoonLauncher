@@ -113,7 +113,7 @@ class NativeTests(unittest.TestCase):
                     self.window.navigate(page_id)
                     APP.processEvents()
                     self.assertIs(self.window.page.parentWidget(), self.window.host)
-            QTest.qWait(430)
+            wait_for(lambda: self.window.host.animation.state() == QAbstractAnimation.Stopped, timeout=3000)
             self.assertEqual(observer.detached, [], "A page child briefly became a separate window")
             self.assertEqual(observer.empty_pages, [], "An incomplete page was made visible")
             self.assertAlmostEqual(self.window.page.graphicsEffect().opacity(), 1.0)

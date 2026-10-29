@@ -130,7 +130,7 @@ class FakeServer:
 class LocalServerTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()
         self.app = Application(self.root/'data')
         self.folder = self.root/'existing server'; self.folder.mkdir()
         (self.folder/'server.jar').write_bytes(b'fixture')

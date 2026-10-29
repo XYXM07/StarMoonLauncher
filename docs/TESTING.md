@@ -6,6 +6,8 @@
 
 0.7.9 发布前完整回归共 473 项，全部通过，日志为 `test-results/release-regression-0.7.9.log`。覆盖新增的服务器列表、本地开服、SRV、控制台与进程控制、默认 AI 依赖分批检查、内置 CurseForge 密钥回退与自定义覆盖，以及搜索加载前后的宽度稳定。旧的「更多」导航断言已更新为包含服务器入口。
 
+GitHub Windows 环境的服务端夹具统一使用解析后的绝对路径，避免 `RUNNER~1` 与 `runneradmin` 被误判为不同目录；快速导航测试等待动画真正完成后再检查最终透明度，避免负载较高时固定延时早于最后一帧。两处调整保持原有路径与动画结果断言。
+
 正式 EXE 隔离验收通过，包含服务器、AI 分批和 DNS 模块、内置密钥配置、WAM、Windows 版本资源、透明四角、中英文与预设壁纸重启保持，日志为 `test-results/release-acceptance-0.7.9.log`。0.7.8 → 0.7.9 的真实更新辅助进程完成替换、备份和重启，并保留账号、设置、服务器记录及存档；日志和结果为 `test-results/auto-update-acceptance-0.7.9.log` 及对应 JSON。所有验收只操作独立测试目录。
 
 CurseForge 已使用发布者密钥真实检索并安装 `Clumps-forge-1.20.1-12.0.0.4.jar`，文件大小 20299 字节，SHA-1 校验通过；记录为 `test-results/curseforge-builtin-live.log`。公开源码及源码 ZIP 已检查不包含真实密钥；正式 EXE 按发布者要求内置密钥。
