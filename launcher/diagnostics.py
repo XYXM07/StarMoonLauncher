@@ -181,7 +181,7 @@ class Diagnostics:
     def redact(self,text,key=""):
         text = str(text)
         config = self.store.config()
-        for secret in (key,config.get("curseforge_key","")):
+        for secret in (key,config.get("curseforge_key",""),self.store.curseforge_key()):
             if secret:
                 text = text.replace(secret,"[SECRET]")
         for account in config.get("accounts",[]):
@@ -393,20 +393,46 @@ class Diagnostics:
             if isinstance(obj,dict): return {self.redact(str(k),secret):clean(v) for k,v in obj.items()}
             return obj
         safe = clean(data)
-        if "mods" in safe:
-            mods,remaining = [],30000
-            for mod in safe["mods"]:
-                length = len(json.dumps(mod,ensure_ascii=False))
-                if length>remaining:
-                    safe["scan_truncated"] = True
-                    break
-                mods.append(mod)
-                remaining -= length
-            safe["mods"] = mods
-        if "local_findings" in safe: safe["local_findings"] = [str(v)[:200] for v in safe["local_findings"][:20]]
         if "logs" in safe: safe["logs"] = safe["logs"][-22000:]
+        if 'mods' not in safe:
+            return self._request_one(safe, c, secret, task)
+        from .diagnostic_batches import mod_batches, combine
+        batches, skipped = mod_batches(safe)
+        reports = []
+        for index, batch in enumerate(batches, 1):
+            if task:
+                task.update('大模型检查：第 {} / {} 批'.format(index, len(batches)), 10 + 80 * (index - 1) / len(batches))
+            try:
+                report = self._request_one(batch, c, secret, task)
+            except Cancelled:
+                raise
+            except LauncherError as exc:
+                if not reports: raise
+                reports.append({'status': 'unknown', 'cause': self.redact(str(exc), secret)[:80],
+                                'suggestion': 'Retry this check.' if c.get('language') == 'en_US' else '请重新检查。',
+                                'source': 'ai', 'batch': index, 'failed': True})
+                break
+            reports.append(dict(report, batch=index))
+        if len(batches) == 1 and not skipped:
+            return {key: value for key, value in reports[0].items() if key != 'batch'}
+        return combine(reports, len(batches), skipped, c.get('language') == 'en_US')
+
+    def _request_one(self, safe, c, secret, task=None):
+        url = endpoint(c.get('ai_base_url', ''))
+        model = str(c.get('ai_model', '')).strip()
         prompt = json.dumps(safe,ensure_ascii=False)
         system = SYSTEM
+        if safe.get('batch'):
+            system += ('\n本次输入是一批模组，请只判断本批提供的模组和 local_findings，不因未看到其他批次而声称数据被截断。'
+                       'provided 是全量扫描中与本批相关的已启用 ID/版本，包含其他批次和内嵌模组提供的前置；不要因模组未列在本批 mods 中而判为缺失。'
+                       'disabled_providers 是全量扫描中相关的已禁用 ID/版本；duplicate_ids 是全量扫描确认的重复 ID 数量。'
+                       'metadata_fragment=true 表示同一模组元数据的分段，不是重复安装，不要据此猜测模组缺少其他字段。')
+        if safe.get('kind') == 'dependencies':
+            system += ('\n本次仅检查模组依赖、版本范围和冲突，不分析游戏文件完整性或启动日志。'
+                       '只按输入的当前加载器、Minecraft 版本及元数据判断，不根据文件名猜测其他加载器的前置。'
+                       'enabled=false 的模组未启用，不提供依赖，也不检查其自身依赖；若它满足启用模组缺失的前置，可建议启用。'
+                       'provided 包含已启用模组及内嵌模组提供的 ID。未识别、截断或无法解析的版本范围应标记为无法确认。'
+                       'cause 概括主要问题，suggestion 给出需要启用、安装或调整的具体模组 ID 与版本；不得编造未声明的依赖。')
         if c.get("language") == "en_US":
             system += "\nFor this request, write cause and suggestion in English only. Keep cause within 80 characters and suggestion within 140 characters."
         body = {"model":model,"messages":[{"role":"system","content":system},{"role":"user","content":prompt}],"max_tokens":2048,"stream":False,"response_format":{"type":"json_object"}}
@@ -484,7 +510,9 @@ class Diagnostics:
         provider = hashlib.sha256((c.get("ai_base_url","")+"\0"+c.get("ai_model","")).encode()).hexdigest()
         path = self.store.instance_dir(instance_id)/"diagnostics"/("latest-"+kind+".json")
         previous = read_json(path,{})
-        if reuse and previous.get("fingerprint")==fingerprint and previous.get("provider")==provider and time.time()-previous.get("time",0)<300:
+        if (reuse and previous.get('analysis_format') == 'batched-v1' and
+                previous.get('completed_batches', 1) == previous.get('batch_count', 1) and
+                previous.get("fingerprint")==fingerprint and previous.get("provider")==provider and time.time()-previous.get("time",0)<300):
             return dict(previous,cached=True)
         data["kind"] = kind
         if extra_error: data["launch_error"] = extra_error[:2000]
@@ -494,7 +522,7 @@ class Diagnostics:
             report["status"] = "risk"
             # Keep verified local findings even if the model misses them.
             report["cause"] = self.redact(data["local_findings"][0])[:80]
-        report.update(kind=kind,instance_id=instance_id,time=time.time(),fingerprint=fingerprint,provider=provider)
+        report.update(kind=kind,instance_id=instance_id,time=time.time(),fingerprint=fingerprint,provider=provider,analysis_format='batched-v1')
         if process_id: report["process_id"] = process_id
         atomic_json(path,report)
         return report

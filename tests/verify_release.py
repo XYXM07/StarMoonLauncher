@@ -36,6 +36,8 @@ assert "launcher.mcmod_links" in modules
 assert "launcher.recovery_ui" in modules
 assert "launcher.pack_session" in modules and "launcher.pack_ui" in modules
 assert "launcher.mod_previews" in modules
+assert all(name in modules for name in ('launcher.server_list', 'launcher.local_servers', 'launcher.server_ui',
+                                       'launcher.diagnostic_batches', 'launcher.publisher', 'dns.resolver', 'dns.rdtypes.IN.SRV'))
 assert "launcher.mod_sites" in modules
 assert "launcher.local_list" in modules
 assert all(name in modules for name in ("launcher.management", "launcher.management_ui", "launcher.pack_updates", "launcher.dependencies", "launcher.java_manager", "launcher.problem_reports"))
@@ -48,10 +50,14 @@ for preset,_,filename in BACKGROUND_PRESETS:
     original = root/asset
     assert archive.extract(names[asset]) == original.read_bytes(),asset
 assert "licenses/tomli.txt" in names
+assert 'licenses/dnspython.txt' in names
 assert archive.extract(names["assets/starmoon.png"]) == (root / "assets/starmoon.png").read_bytes()
 publisher = json.loads(archive.extract(names["publisher.json"]))
 expected_publisher = os.environ.get("BLOCKCRAFT_MS_CLIENT_ID") or json.loads((root/"publisher.json").read_text(encoding="utf-8"))["microsoft_client_id"]
 assert publisher["microsoft_client_id"] == expected_publisher.strip()
+from launcher.publisher import build_settings
+expected_key = build_settings(root).get('curseforge_api_key', '')
+assert expected_key and publisher.get('curseforge_api_key') == expected_key, 'Release requires the configured publisher key'
 assert hashlib.sha256(archive.extract(names["assets/authlib-injector-1.2.8.jar"])).hexdigest() == "9c7f4343e6c82034958ffb48c14a2cb0c85928be7283103ce17da00c6d5a7b10"
 
 icon = (root / "assets/starmoon.ico").read_bytes()
@@ -81,7 +87,7 @@ isolated = Path(tempfile.mkdtemp(prefix="isolated-release-", dir=str(output)))
 copy = isolated / executable.name
 shutil.copy2(str(executable), str(copy))
 environment = dict(os.environ)
-for name in ("PYTHONHOME", "PYTHONPATH", "BLOCKCRAFT_MS_CLIENT_ID"):
+for name in ("PYTHONHOME", "PYTHONPATH", "BLOCKCRAFT_MS_CLIENT_ID", "STARMOON_CURSEFORGE_API_KEY"):
     environment.pop(name, None)
 environment["PATH"] = str(Path(environment.get("SystemRoot", "C:/Windows")) / "System32")
 image = isolated / "exe.png"
@@ -95,6 +101,8 @@ assert config["memory_auto"] and config["download_parallel"]
 assert config["auto_check_updates"]
 assert config["ai_github_search"] is False and config["ai_pack_download_fallback"] is True
 assert config["ai_pack_download_default_on"] is True
+assert config['ai_dependency_check'] is True
+assert not config['curseforge_key'] and expected_key not in json.dumps(config)
 assert config["background_mode"] == "default" and not config["background_path"]
 assert config["background_preset"] == "default"
 assert (config["launcher_width"],config["launcher_height"]) == (900,600)
@@ -134,6 +142,7 @@ record = {"version": __version__, "size": executable.stat().st_size,
           "single_exe_smoke": True, "transparent_corners": True,
           "bundled_wallpapers":len(BACKGROUND_PRESETS), "preset_survives_reextraction":True,
           "english_survives_reextraction": True, "languages": ["zh_CN", "en_US"], "auto_update_modules": True,
+          "bundled_curseforge_key": True, "server_management_modules": True, "ai_dependency_batches": True,
           "windows_file_version": strings["FileVersion"]}
 (output/"release-verification.json").write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
 print("ISOLATED_EXE_ENGLISH_WALLPAPERS_PRESET_RESTART_WAM_AND_CORNERS_OK", flush=True)

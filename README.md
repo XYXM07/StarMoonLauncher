@@ -2,9 +2,9 @@
 
 [English](README.en.md)
 
-由 **星月晓梦** 制作的 Windows Minecraft Java 版第三方启动器。使用 Python / PySide6 构建，提供原生无边框液态玻璃界面，可打包为单个 EXE。当前版本 **0.7.8**。
+由 **星月晓梦** 制作的 Windows Minecraft Java 版第三方启动器。使用 Python / PySide6 构建，提供原生无边框液态玻璃界面，可打包为单个 EXE。当前版本 **0.7.9**。
 
-[下载 Windows 64 位单文件版](https://github.com/XYXM07/StarMoonLauncher/releases/download/v0.7.8/StarMoonLauncher-0.7.8-windows-x64.exe) · [GitHub Releases](https://github.com/XYXM07/StarMoonLauncher/releases)
+[下载 Windows 64 位单文件版](https://github.com/XYXM07/StarMoonLauncher/releases/download/v0.7.9/StarMoonLauncher-0.7.9-windows-x64.exe) · [GitHub Releases](https://github.com/XYXM07/StarMoonLauncher/releases)
 
 下载 EXE 后直接双击运行，无需安装 Python 或自行编译。
 
@@ -12,9 +12,10 @@
 
 ## 功能
 
-- 新增模组批量管理、整合包原地升级与回滚、依赖树及前置修复、Java 管理中心和日志/问题报告中心。[使用说明](docs/MANAGEMENT.md)
+- 服务器收藏、状态查询与直接加入，以及本地服务端导入、原版下载、控制台和配置管理。入口为「更多 → 服务器管理」。[使用说明](docs/SERVERS.md)
 
 - 新增模组批量管理、整合包原地升级与回滚、依赖树及前置修复、Java 管理中心和日志/问题报告中心。[使用说明](docs/MANAGEMENT.md)
+
 
 - 离线账号、Windows Web Account Manager 微软登录。
 - 账号列表、登录与皮肤操作统一位于「设置 → 账号管理」；启动页保留快捷入口。
@@ -23,9 +24,8 @@
 - PCL 式版本管理，直接添加已有 `.minecraft`，管理模组、存档与版本参数。
 - 扫描本机或指定目录下的 `.minecraft`，勾选后批量添加；扫描可随时停止。
 - 官方源 / BMCLAPI 镜像、分段下载、任务进度和速度显示。
-- Modrinth / CurseForge 内容检索、模组与整合包下载；CurseForge 需要自行配置 API Key。
+- Modrinth / CurseForge 内容检索、模组与整合包下载；正式版已内置 CurseForge API Key，也可在设置中使用自己的密钥覆盖。
 - 新增 Faithful 资源包来源：浏览 Java 版 32x / 64x 与 Classic / Jappa 系列，选择兼容版本并直接安装，无需 API Key。
-- 版本高级启动设置支持 Vulkan（Zink）/ DirectX 12（Mesa D3D12）/ 软件渲染，并可分别控制默认 JVM 参数、启动文件校验、Java 版本检查和本地库自动适配。
 - 版本高级启动设置支持 Vulkan（Zink）/ DirectX 12（Mesa D3D12）/ 软件渲染，并可分别控制默认 JVM 参数、启动文件校验、Java 版本检查和本地库自动适配。
 - ATLauncher / FTB 整合包浏览与安装、MC 百科中文检索及原站入口、GitHub Releases 模组安装。[内容来源说明](docs/CONTENT_SOURCES.md)
 - 可选的 AI 模组名称搜索，以及默认开启的整合包模组补下载。优先从 MC百科相关链接定位项目；补下载前先确认，再由玩家选择候选版本。两个独立开关位于「设置 → 智能排查」，共用已配置的模型接口。
@@ -43,7 +43,7 @@
 
 ## 使用
 
-运行 `StarMoonLauncher-0.7.8-windows-x64.exe`。首次打开不会自动创建游戏目录；在「启动 → 版本选择」中选择「创建 .minecraft 文件夹」或「添加 .minecraft 文件夹」。下载游戏后选择版本与账号，再启动。
+运行 `StarMoonLauncher-0.7.9-windows-x64.exe`。首次打开不会自动创建游戏目录；在「启动 → 版本选择」中选择「创建 .minecraft 文件夹」或「添加 .minecraft 文件夹」。下载游戏后选择版本与账号，再启动。
 
 在版本选择左侧点击「扫描 .minecraft 文件夹」：默认递归扫描本机硬盘和可移动磁盘，也可指定扫描目录。扫描结果显示路径、版本数和已添加状态，勾选后批量添加；停止扫描会保留已找到的结果。无权限目录和目录链接会跳过，游戏文件继续保留在原位置。
 
@@ -66,7 +66,7 @@ py -3.11 -m venv .venv
 构建单文件 EXE：
 
 ```powershell
-.\.venv\Scripts\python.exe build.py --output-name StarMoonLauncher-0.7.8-windows-x64
+.\.venv\Scripts\python.exe build.py --output-name StarMoonLauncher-0.7.9-windows-x64
 ```
 
 运行回归测试：

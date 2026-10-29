@@ -36,7 +36,7 @@ class ContentManager:
         self._writes = threading.local()
 
     def curse(self, path):
-        key = self.store.config()["curseforge_key"]
+        key = self.store.curseforge_key()
         if not key:
             raise LauncherError("使用 CurseForge 前请在设置中填写 API Key；Modrinth 无需密钥")
         return request_json(CURSEFORGE + path, headers={"x-api-key": key})
@@ -380,7 +380,7 @@ class ContentManager:
                 index = metadata("manifest.json")
                 if index.get("manifestType") != "minecraftModpack" or index.get("manifestVersion") != 1:
                     raise LauncherError("不支持此 CurseForge 整合包格式")
-                if index.get("files") and not self.store.config()["curseforge_key"]:
+                if index.get("files") and not self.store.curseforge_key():
                     raise LauncherError("导入 CurseForge 整合包需要在设置中填写 API Key")
                 loaders = index.get("minecraft", {}).get("modLoaders", [])
                 loader_id = next((l["id"] for l in loaders if l.get("primary")), loaders[0]["id"] if loaders else "")

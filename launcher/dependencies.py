@@ -1,11 +1,15 @@
 """Local dependency graph and transactional, verified candidate installation."""
-from .core import LauncherError
+from .core import Cancelled, LauncherError
 from .diagnostics import satisfies
 from .management import mod_transaction, digest
 
 
 def graph(app, identifier, task=None):
     data, fingerprint = app.diagnostics.snapshot(identifier, task, include_disabled=True)
+    return _graph(data, fingerprint)
+
+
+def _graph(data, fingerprint):
     nodes, edges = data['mods'], []
     disabled = {}
     for record in nodes:
@@ -24,6 +28,34 @@ def graph(app, identifier, task=None):
                 edges.append({'source': record.get('id') or record['file'], 'file': record['file'].split('!')[0], 'target': target,
                               'required': required, 'version': version, 'kind': kind, 'status': status, 'disabled_file': disabled.get(target)})
     return {'nodes': nodes, 'edges': edges, 'issues': data['local_findings'], 'fingerprint': fingerprint}
+
+
+def check(app, identifier, task=None):
+    """AI reviews loader-specific metadata; verified edges remain authoritative."""
+    data, fingerprint = app.diagnostics.snapshot(identifier, task, include_disabled=True)
+    result = _graph(data, fingerprint)
+    config = app.store.config()
+    result['ai_status'] = 'disabled'
+    if not config.get('ai_dependency_check', True): return result
+    if not app.diagnostics.configured(config):
+        result['ai_status'] = 'not_configured'
+        return result
+    if task: task.update('大模型正在检查模组依赖', 30)
+    try:
+        report = app.diagnostics._request(dict(data, kind='dependencies'), config=config, task=task)
+    except Cancelled:
+        raise
+    except LauncherError as exc:
+        result.update(ai_status='failed', ai_error=app.diagnostics.redact(str(exc))[:240])
+        return result
+    # A download or another dialog may have changed mods while the model ran.
+    current, current_fingerprint = app.diagnostics.snapshot(identifier, task, include_disabled=True)
+    if current_fingerprint != fingerprint:
+        return dict(_graph(current, current_fingerprint), ai_status='stale')
+    if result['issues'] and report.get('status') == 'ok':
+        report = dict(report, status='risk')
+    result.update(ai_status='completed', analysis=report)
+    return result
 
 
 def impact(app, identifier, filenames):

@@ -47,6 +47,13 @@ def main():
     credentials = data / "credentials.json"
     credentials.write_bytes(b'{"test-only":"opaque synthetic credential sentinel"}')
     credentials_hash = sha256_file(credentials)
+    # Newly introduced server records must survive upgrades just like accounts.
+    server_files = {
+        'servers.json': [{'id': 'fixture-server', 'name': 'Keep server', 'address': 'localhost:25565', 'instance': '', 'notes': 'Keep notes'}],
+        'local-servers.json': [{'id': 'fixture-local', 'name': 'Keep local', 'folder': str(work / 'local-server'), 'entry': 'server.jar',
+                                'java_path': '', 'java_major': 21, 'memory': 2048, 'jvm_args': '', 'version': '1.21.1'}]}
+    for name, content in server_files.items(): atomic_json(data / name, content)
+    server_hashes = {name: sha256_file(data / name) for name in server_files}
     world = work / ".Minecraft/saves/KeepWorld/level.dat"
     world.parent.mkdir(parents=True)
     world.write_bytes(b"existing world data must survive the update")
@@ -80,11 +87,13 @@ def main():
     restored = json.loads((data / "config.json").read_text(encoding="utf-8"))
     assert all(restored[key] == value for key, value in config.items())
     assert sha256_file(credentials) == credentials_hash
+    assert all(sha256_file(data / name) == digest for name, digest in server_hashes.items())
     assert world.read_bytes() == b"existing world data must survive the update"
     result = {"isolated": str(work), "packaged_helper": True, "waited_for_old_launcher": True,
               "replacement_hash": new_hash, "backup_hash": old_hash, "restarted": True,
               "language_preserved": True, "settings_preserved": True, "accounts_preserved": True,
               "credentials_preserved": True, "world_preserved": True,
+              "server_records_preserved": True,
               "candidate_version": __version__, "restarted_version": started["version"], "different_payload_bytes": old_hash != new_hash}
     (output / "auto-update-acceptance.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     print("PACKAGED_HELPER_REPLACE_RESTART_BACKUP_AND_PORTABLE_DATA_OK", flush=True)

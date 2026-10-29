@@ -13,6 +13,8 @@ from unittest.mock import Mock, patch
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/".build-env"))
 from launcher.core import Cancelled, LauncherError, Task
 from launcher.diagnostics import endpoint, satisfies, parse_answer
+from launcher.dependencies import check as check_dependencies
+from launcher.diagnostic_batches import PROMPT_LIMIT
 from launcher.service import Application
 
 
@@ -39,7 +41,7 @@ class DiagnosticsTests(unittest.TestCase):
                     self.send_header("Location",owner.url+"/stolen")
                     self.end_headers()
                     return
-                if owner.mode == "http_error":
+                if owner.mode == "http_error" or (owner.mode == 'batch_error' and len(owner.requests) > 1):
                     self.send_response(401); self.end_headers(); return
                 if owner.mode in ("fallback","combined_fallback") and "max_tokens" in body:
                     self.send_response(400); self.end_headers()
@@ -52,6 +54,10 @@ class DiagnosticsTests(unittest.TestCase):
                 content = "not JSON" if owner.mode == "malformed" else json.dumps({"status":"ok","cause":"未发现明确问题","suggestion":"建议保留日志并进行实际启动验证。"},ensure_ascii=False)
                 if owner.mode == "long":
                     content = json.dumps({"status":"risk","cause":"原因"*200,"suggestion":"建议"*300})
+                if owner.mode == 'batch_risk':
+                    data = json.loads(body['messages'][-1]['content'])
+                    if any(mod['id'] == 'late_problem' for mod in data['mods']):
+                        content = json.dumps({'status': 'risk', 'cause': 'late_problem has a conflict', 'suggestion': 'Update late_problem'})
                 response = {"choices":[{"message":{"content":content,"reasoning_content":"NEVER DISPLAY THIS"}}]}
                 budget = body.get("max_tokens",body.get("max_completion_tokens",0))
                 if owner.mode == "always_truncated" or (owner.mode == "truncated_once" and budget<4096):
@@ -166,6 +172,65 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertEqual(self.app.diagnostics.key(),"")
         self.assertFalse(self.app.state()["config"]["ai_key_configured"])
 
+    def test_dependency_ai_default_loader_contract_and_background_route(self):
+        self.app.store.update_instance(self.instance['id'], {'loader': 'forge', 'loader_version': '47.4.0'})
+        self.jar('universal.jar', {'id': 'fabric_mod', 'depends': {'fabric-api': '*'}}, {
+            'META-INF/mods.toml': '[[mods]]\nmodId="forge_mod"\nversion="1"\n[[dependencies.forge_mod]]\nmodId="needed"\nmandatory=true\nversionRange="[1,)"\n'})
+        with zipfile.ZipFile(self.mods/'needed.jar.disabled', 'w') as archive:
+            archive.writestr('META-INF/mods.toml', '[[mods]]\nmodId="needed"\nversion="2"\n')
+        self.assertTrue(self.app.store.config()['ai_dependency_check'])
+        submitted = self.app.route('POST', '/api/dependencies/check', {}, {'instance': self.instance['id']})
+        task = self.wait_task(submitted['task_id'])
+        self.assertEqual(task['status'], 'completed', task)
+        result = task['result']
+        self.assertEqual(result['ai_status'], 'completed')
+        # The fixture model misses the issue; verified local edges still win.
+        self.assertEqual(result['analysis']['status'], 'risk')
+        self.assertEqual([(e['target'], e['status']) for e in result['edges']], [('needed', 'disabled')])
+        body = self.requests[-1][2]
+        data = json.loads(body['messages'][-1]['content'])
+        self.assertEqual(data['kind'], 'dependencies')
+        self.assertEqual(data['loader'], 'forge')
+        self.assertNotIn('fabric-api', json.dumps(data))
+        self.assertNotIn('logs', data)
+        self.assertNotIn('needed', data['provided'])
+        self.assertFalse(next(n for n in data['mods'] if n['id'] == 'needed')['enabled'])
+        self.assertIn('enabled=false', body['messages'][0]['content'])
+
+    def test_dependency_ai_switch_persists_and_unconfigured_never_sends(self):
+        self.app.config_update({'ai_dependency_check': False})
+        self.assertFalse(Application(self.app.store.root).store.config()['ai_dependency_check'])
+        self.assertEqual(check_dependencies(self.app, self.instance['id'])['ai_status'], 'disabled')
+        self.app.config_update({'ai_dependency_check': True, 'ai_model': ''})
+        self.assertEqual(check_dependencies(self.app, self.instance['id'])['ai_status'], 'not_configured')
+        self.assertEqual(self.requests, [])
+
+    def test_dependency_ai_request_failure_retains_local_graph(self):
+        self.jar('a.jar', {'id': 'a', 'version': '1', 'depends': {'missing': '*'}})
+        for mode in ('http_error', 'malformed'):
+            with self.subTest(mode=mode):
+                self.mode = mode
+                result = check_dependencies(self.app, self.instance['id'])
+                self.assertEqual(result['ai_status'], 'failed')
+                self.assertTrue(result['ai_error'])
+                self.assertEqual(result['edges'][0]['status'], 'missing')
+                self.assertNotIn('analysis', result)
+
+    def test_dependency_ai_cancels_and_discards_changed_inventory(self):
+        task = Task('Check', lambda t: None)
+        task.cancel.set()
+        with self.assertRaises(Cancelled):
+            check_dependencies(self.app, self.instance['id'], task)
+        self.assertEqual(self.requests, [])
+        def changed(*args, **kwargs):
+            self.jar('new.jar', {'id': 'new', 'version': '1'})
+            return {'status': 'ok', 'cause': 'old result', 'suggestion': 'old advice'}
+        with patch.object(self.app.diagnostics, '_request', side_effect=changed):
+            result = check_dependencies(self.app, self.instance['id'])
+        self.assertEqual(result['ai_status'], 'stale')
+        self.assertEqual(result['nodes'][0]['id'], 'new')
+        self.assertNotIn('analysis', result)
+
     def test_local_issue_forces_risk_and_cache_invalidates_when_mods_change(self):
         self.jar("a.jar",{"id":"a","version":"1","depends":{"missing":"*"}})
         report = self.app.diagnostics.analyze(self.instance["id"])
@@ -235,13 +300,121 @@ class DiagnosticsTests(unittest.TestCase):
                 self.app.start_game(self.instance["id"],"account",Task("launch",None))
         self.assertEqual(len(self.app.tasks.list()),1)
 
-    def test_truncated_large_mod_payload_is_valid_json_and_never_auto_ok(self):
+    def test_oversized_single_field_is_explicit_and_does_not_drop_later_mods(self):
         data = {"kind":"preflight","mods":[{"id":"large","depends":{"entry":"x"*40000}}],"local_findings":[]}
+        data['mods'].append({'id': 'after_large', 'version': '1'})
         report = self.app.diagnostics._request(data)
         sent = json.loads(self.requests[-1][2]["messages"][-1]["content"])
-        self.assertTrue(sent["scan_truncated"])
+        self.assertEqual([mod['id'] for mod in sent['mods']], ['after_large'])
+        self.assertEqual(report['skipped_mods'], ['large'])
         self.assertEqual(report["status"],"unknown")
         self.assertLessEqual(len(report["cause"]),80)
+
+    def batch_data(self, kind='dependencies'):
+        mods = [{'file': 'mod_{}.jar'.format(i), 'id': 'mod_' + str(i), 'version': '1.0',
+                 'enabled': True, 'depends': {'external_alias': '>=1', 'disabled_lib': '*'},
+                 'breaks': {'external_alias': '<1'}} for i in range(1000)]
+        mods[0]['id'], mods[-3]['id'] = 'duplicate', 'duplicate'
+        mods[-2] = {'file': 'last_provider.jar', 'id': 'provider', 'version': '2', 'enabled': True, 'provides': ['external_alias']}
+        mods[-1]['id'] = 'late_problem'
+        mods.append({'id': 'disabled_lib', 'file': 'disabled.jar.disabled', 'version': '3', 'enabled': False})
+        return {'kind': kind, 'minecraft': '1.20.1', 'loader': 'fabric', 'mod_count': len(mods), 'mods': mods,
+                'provided': {'minecraft': '1.20.1', 'fabricloader': '0.16.0', 'external_alias': '2'},
+                'local_findings': ['finding_' + str(i) for i in range(60)]}
+
+    def test_large_inventory_checks_every_mod_with_cross_batch_providers_and_late_risk(self):
+        self.mode = 'batch_risk'
+        data = self.batch_data()
+        report = self.app.diagnostics._request(data)
+        batches = [json.loads(r[2]['messages'][-1]['content']) for r in self.requests]
+        self.assertGreater(len(batches), 1)
+        self.assertEqual([mod for b in batches for mod in b['mods']], data['mods'])
+        self.assertEqual([v for b in batches for v in b['local_findings']], data['local_findings'])
+        for b in batches:
+            self.assertLessEqual(len(json.dumps(b, ensure_ascii=False)), PROMPT_LIMIT)
+            self.assertNotIn('scan_truncated', b)
+            if any(mod.get('depends') for mod in b['mods']):
+                self.assertEqual(b['provided']['external_alias'], '2')
+                self.assertEqual(b['disabled_providers']['disabled_lib'], ['3'])
+                self.assertNotIn('disabled_lib', b['provided'])
+            if any(mod['id'] == 'duplicate' for mod in b['mods']):
+                self.assertEqual(b['duplicate_ids']['duplicate'], 2)
+        self.assertNotIn('provider', [mod['id'] for mod in batches[0]['mods']])
+        self.assertEqual(report['status'], 'risk')
+        self.assertIn('late_problem', report['cause'])
+        self.assertEqual(report['completed_batches'], report['batch_count'])
+        self.assertEqual(len(report['batch_reports']), len(batches))
+        self.assertEqual(report['skipped_mods'], [])
+
+    def test_large_single_descriptor_splits_requirements_without_losing_them(self):
+        requirements = {'library_' + str(i): '>=1.0.0' for i in range(2200)}
+        data = {'kind': 'dependencies', 'mods': [{'file': 'huge.jar', 'id': 'huge', 'version': '1', 'depends': requirements,
+                 'breaks': {'conflict': '*'}, 'provides': ['alias']}],
+                'provided': {name: '2' for name in requirements}, 'local_findings': []}
+        report = self.app.diagnostics._request(data)
+        seen = {}
+        fragments = []
+        for r in self.requests:
+            payload = json.loads(r[2]['messages'][-1]['content'])
+            self.assertLessEqual(len(r[2]['messages'][-1]['content']), PROMPT_LIMIT)
+            for mod in payload['mods']:
+                fragments.append(mod)
+                seen.update(mod.get('depends', {}))
+                for dependency in mod.get('depends', {}): self.assertEqual(payload['provided'][dependency], '2')
+        self.assertEqual(seen, requirements)
+        self.assertTrue(all(mod['metadata_fragment'] for mod in fragments))
+        self.assertTrue(any(mod.get('breaks', {}).get('conflict') == '*' for mod in fragments))
+        self.assertTrue(any('alias' in mod.get('provides', []) for mod in fragments))
+        self.assertEqual(report['skipped_mods'], [])
+        self.assertEqual(report['status'], 'ok')
+
+    def test_batch_failure_preserves_completed_results_and_never_approves_partial_scan(self):
+        self.mode = 'batch_error'
+        self.app.config_update({'language': 'en_US'})
+        report = self.app.diagnostics._request(self.batch_data())
+        self.assertEqual(len(self.requests), 2)
+        self.assertEqual(report['status'], 'unknown')
+        self.assertEqual(report['completed_batches'], 1)
+        self.assertGreater(report['batch_count'], 2)
+        self.assertEqual(len(report['batch_reports']), 2)
+        self.assertTrue(report['batch_reports'][-1]['failed'])
+        self.assertIn('incomplete', report['cause'])
+
+    def test_batch_cancel_stops_before_sending_remaining_mods(self):
+        task = Task('Check', lambda t: None)
+        original = self.app.diagnostics._request_one
+        def cancel_after_first(*args, **kwargs):
+            report = original(*args, **kwargs)
+            task.cancel.set()
+            return report
+        with patch.object(self.app.diagnostics, '_request_one', side_effect=cancel_after_first):
+            with self.assertRaises(Cancelled): self.app.diagnostics._request(self.batch_data(), task=task)
+        self.assertEqual(len(self.requests), 1)
+
+    def test_old_truncated_cache_and_incomplete_batches_are_not_reused(self):
+        self.app.diagnostics.analyze(self.instance['id'])
+        path = self.app.store.instance_dir(self.instance['id'])/'diagnostics/latest-preflight.json'
+        old = json.loads(path.read_text(encoding='utf-8'))
+        old.pop('analysis_format')
+        old['cause'] = '数据已截断'
+        path.write_text(json.dumps(old), encoding='utf-8')
+        refreshed = self.app.diagnostics.analyze(self.instance['id'], reuse=True)
+        self.assertEqual(len(self.requests), 2)
+        self.assertNotIn('cached', refreshed)
+        refreshed.update(completed_batches=1, batch_count=3)
+        path.write_text(json.dumps(refreshed), encoding='utf-8')
+        self.assertNotIn('cached', self.app.diagnostics.analyze(self.instance['id'], reuse=True))
+        self.assertEqual(len(self.requests), 3)
+
+    def test_crash_batches_keep_logs_and_all_metadata(self):
+        data = self.batch_data('crash')
+        data['logs'] = 'RuntimeException fixture\n' * 1000
+        report = self.app.diagnostics._request(data)
+        batches = [json.loads(r[2]['messages'][-1]['content']) for r in self.requests]
+        self.assertEqual([mod for b in batches for mod in b['mods']], data['mods'])
+        self.assertTrue(all('RuntimeException fixture' in b['logs'] for b in batches))
+        self.assertTrue(all(len(r[2]['messages'][-1]['content']) <= PROMPT_LIMIT for r in self.requests))
+        self.assertEqual(report['completed_batches'], report['batch_count'])
 
     def test_corrupt_optional_key_file_does_not_break_launcher_state(self):
         self.app.diagnostics.key_path.write_text("not-json",encoding="utf-8")

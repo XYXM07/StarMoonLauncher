@@ -559,16 +559,27 @@ class GameManager:
             command += expand_arguments(split_args(profile.get("minecraftArguments", "")), values, features)
             command += ["--width", str(config["width"]), "--height", str(config["height"])]
         command += split_args(config["game_args"]) + split_args(instance.get("game_args"))
+        if instance.get('_join_server'):
+            from .server_list import join_arguments
+            index = command.index(profile['mainClass']) + 1
+            game_arguments, skip = [], False
+            options = ('--server', '--port', '--quickPlayMultiplayer', '--quickPlaySingleplayer', '--quickPlayRealms')
+            for argument in command[index:]:
+                if skip: skip = False; continue
+                if argument in options: skip = True; continue
+                if any(argument.startswith(option + '=') for option in options): continue
+                game_arguments.append(argument)
+            command[index:] = game_arguments + join_arguments(dict(profile, id=instance['game_version']), instance['_join_server'])
         unresolved = [arg for arg in command if "${" in arg]
         if unresolved:
             raise LauncherError("版本包含不支持的启动变量：" + ", ".join(unresolved)[:150])
         return command
 
-    def launch(self, instance_id, account_id, task):
+    def launch(self, instance_id, account_id, task, server=None):
         instance = self.store.instance(instance_id)
         manager = self.context(instance)
         if manager is not self:
-            return manager.launch(instance_id, account_id, task)
+            return manager.launch(instance_id, account_id, task, server=server)
         process_id = "run-"+uuid.uuid4().hex
         directory = self.store.instance_dir(instance_id)
         runtime = directory / "runs" / process_id
@@ -601,6 +612,7 @@ class GameManager:
                         extract_zip(safe_path(self.mc/"libraries",lib["path"]),runtime/"natives",exclude=["META-INF/"]+lib.get("exclude",[]),task=task)
         skin = self.skins.prepare(account)
         try:
+            if server: instance = dict(instance, _join_server=server)
             command = self.command(instance, account, java, runtime)
             if skin:
                 command[1:1] = skin.arguments

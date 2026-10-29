@@ -15,7 +15,8 @@ def listing(app):
     instances = app.store.instances()
     candidates = app.game.java_candidates()
     known = {os.path.normcase(str(Path(j['path']).resolve())) for j in candidates}
-    for instance in instances:
+    servers = app.local_servers.entries()
+    for instance in instances + servers:
         path = instance.get('java_path') or instance.get('detected_java')
         if path and os.path.normcase(str(Path(path).resolve())) not in known:
             inspected = app.game.inspect_java(path)
@@ -27,6 +28,7 @@ def listing(app):
     for item in candidates:
         path = Path(item['path']).resolve()
         uses = [i['name'] for i in instances if any(i.get(k) and Path(i[k]).resolve() == path for k in ('java_path', 'detected_java'))]
+        uses += [server['name'] for server in servers if server.get('java_path') and Path(server['java_path']).resolve() == path]
         global_path = app.store.config().get('java_path')
         if global_path and Path(global_path).resolve() == path: uses.insert(0, '全局默认')
         managed = runtime in path.parents
@@ -77,6 +79,7 @@ def remove(app, path, task):
 
 def _remove(app, path, task):
     # Conservative: do not retire any runtime while any owned game is active.
+    if app.local_servers.active(): raise LauncherError('请先停止所有本地服务端再清理 Java')
     if any(p['running'] for p in app.game.process_status()): raise LauncherError('请先关闭所有游戏再清理 Java')
     item = next((j for j in listing(app) if Path(j['path']).resolve() == Path(path).resolve()), None)
     if not item or not item['managed'] or item['uses']: raise LauncherError('仅可清理未被使用的启动器托管 Java')

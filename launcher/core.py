@@ -416,7 +416,7 @@ class Store:
                          "minecraft_folders": [], "library_root": "", "hidden_external_instances": [],
                          "launcher_width": 900, "launcher_height": 600, "compact_window_default": True,
                          "language": "zh_CN", "color_scheme": "starmoon", "ai_base_url": "", "ai_model": "",
-                         "ai_crash_analysis": True, "ai_auto_preflight": False, "auto_check_updates": True,
+                         "ai_crash_analysis": True, "ai_auto_preflight": False, "ai_dependency_check": True, "auto_check_updates": True,
                          "ai_github_search": False, "ai_pack_download_fallback": True,
                          "ai_pack_download_default_on": True}
         saved = read_json(self.path, {})
@@ -476,14 +476,21 @@ class Store:
         data = self.config()
         data.pop("ai_api_key",None)
         data.pop("ai_clear_key",None)
+        from .publisher import curseforge_key
+        data["curseforge_builtin"] = bool(curseforge_key())
+        data["curseforge_custom_configured"] = bool(data["curseforge_key"])
+        data["curseforge_configured"] = bool(self.curseforge_key())
         data["curseforge_key"] = ""  # Keys are never returned to the frontend.
-        data["curseforge_configured"] = bool(self.data["curseforge_key"])
         try:
             ai_keys = read_json(self.root / "ai-credentials.json",{})
             data["ai_key_configured"] = isinstance(ai_keys,dict) and bool(ai_keys.get("key"))
         except (OSError,ValueError):
             data["ai_key_configured"] = False
         return data
+
+    def curseforge_key(self):
+        from .publisher import curseforge_key
+        return self.config().get("curseforge_key", "").strip() or curseforge_key()
 
     def instance_dir(self, instance_id):
         external = safe_path(self.root / "external-instances", valid_id(instance_id))

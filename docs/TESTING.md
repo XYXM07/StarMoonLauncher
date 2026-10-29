@@ -4,6 +4,12 @@
 
 按项目约定，普通修改只验证本次改动及直接受影响的功能，不运行全量回归；本地构建也不自动触发全套发布验收。只有发布版本时才执行完整功能回归与发布验收。
 
+0.7.9 发布前完整回归共 473 项，全部通过，日志为 `test-results/release-regression-0.7.9.log`。覆盖新增的服务器列表、本地开服、SRV、控制台与进程控制、默认 AI 依赖分批检查、内置 CurseForge 密钥回退与自定义覆盖，以及搜索加载前后的宽度稳定。旧的「更多」导航断言已更新为包含服务器入口。
+
+正式 EXE 隔离验收通过，包含服务器、AI 分批和 DNS 模块、内置密钥配置、WAM、Windows 版本资源、透明四角、中英文与预设壁纸重启保持，日志为 `test-results/release-acceptance-0.7.9.log`。0.7.8 → 0.7.9 的真实更新辅助进程完成替换、备份和重启，并保留账号、设置、服务器记录及存档；日志和结果为 `test-results/auto-update-acceptance-0.7.9.log` 及对应 JSON。所有验收只操作独立测试目录。
+
+CurseForge 已使用发布者密钥真实检索并安装 `Clumps-forge-1.20.1-12.0.0.4.jar`，文件大小 20299 字节，SHA-1 校验通过；记录为 `test-results/curseforge-builtin-live.log`。公开源码及源码 ZIP 已检查不包含真实密钥；正式 EXE 按发布者要求内置密钥。
+
 0.7.8 发布前完整回归共 439 项，全部通过，日志为 `test-results/release-regression-0.7.8.log`。发布检查修正了批量更新窗口的旧测试，并补充实例在目录枚举后被失败清理删除的竞态用例；读取时跳过已移除的实例元数据，界面继续刷新并显示失败弹窗。
 
 正式 EXE 的单文件资源、Windows 版本、WAM、默认值、透明四角、中英文与预设壁纸重启验收通过，日志为 `test-results/release-acceptance-0.7.8.log`。0.7.7 → 0.7.8 实际辅助进程完成替换、备份、重启，保留便携目录设置、账号文件与存档，记录为 `test-results/auto-update-acceptance-0.7.8.log` 及对应 JSON。所有验收仅操作独立测试目录。
@@ -81,7 +87,7 @@ AI 下载功能当前有 25 项后端回归、10 项 MC百科链接回归与 2 �
 构建后执行：
 
 ```powershell
-.\.venv\Scripts\python.exe tests/verify_release.py dist/StarMoonLauncher-0.7.8-windows-x64.exe
+.\.venv\Scripts\python.exe tests/verify_release.py dist/StarMoonLauncher-0.7.9-windows-x64.exe
 ```
 
 检查 Windows 文件版本、资源、模块、图标、WAM DLL，并将 EXE 复制到独立临时目录启动，验证默认紧凑尺寸、不自动创建游戏目录、透明四角、预设壁纸切换，以及英文界面和语言选择在多次解包重启后保持。它会启动自己的测试窗口并自动退出，结果位于 `test-results/release-verification.json`。

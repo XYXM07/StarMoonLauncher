@@ -138,6 +138,47 @@ class ProviderUiTests(unittest.TestCase):
             frame = next(w for w in self.window.page.findChildren(QWidget, "project-card") if w.isVisible())
             self.assertLessEqual(frame.height(), 160)
 
+    def test_curseforge_search_keeps_width_during_loading_and_result_changes(self):
+        import threading
+        from PySide6.QtWidgets import QWidget
+        gate, entered = threading.Event(), threading.Event()
+        project = {'project_id': '1', 'title': 'Just Enough Items (JEI) ' * 30,
+                   'description': 'A mod description ' * 50, 'author': 'LongAuthor' * 60,
+                   'downloads': 12345678, 'icon_url': ''}
+        initial = {'hits': [dict(project, project_id=str(index)) for index in range(18)], 'total_hits': 18}
+        response = {'hits': [project], 'total_hits': 1}
+        def search(query='', *args, **kwargs):
+            if query:
+                entered.set()
+                gate.wait(5)
+                return response
+            return initial
+        try:
+            with patch.object(self.service.content, 'search', side_effect=search):
+                self.window.resize(900, 600)
+                self.window.search_state['provider'] = 'curseforge'
+                self.window.explore('mod')
+                native.wait_for(lambda: len(self.window.content_result.findChildren(QWidget, 'project-card')) == 18)
+                QTest.qWait(350)
+                width = self.window.content_query.width()
+                self.window.content_query.setText('fixture')
+                QTest.mouseClick(next(b for b in self.window.page.findChildren(Button) if b.text() == '搜索'), Qt.LeftButton)
+                native.wait_for(entered.is_set)
+                QTest.qWait(80)
+                self.assertEqual(self.window.content_query.width(), width, 'Loading changed the search row width')
+                gate.set()
+                native.wait_for(lambda: len(self.window.content_result.findChildren(QWidget, 'project-card')) == 1)
+                QTest.qWait(80)
+                self.assertEqual(self.window.content_query.width(), width, 'A short result list widened the page')
+                self.assertLessEqual(self.window.page.body.width(), self.window.page.viewport().width())
+                result = self.window.content_result
+                frame = result.findChild(QWidget, 'project-card')
+                self.assertLessEqual(frame.geometry().right(), result.width())
+                button = next(b for b in frame.findChildren(Button) if b.text() == '选择版本')
+                self.assertLessEqual(button.mapTo(result, button.rect().bottomRight()).x(), result.width())
+        finally:
+            gate.set()
+
     def test_ai_download_switches_save_immediately_and_round_trip(self):
         self.window.navigate("settings", animated=False)
         self.window.set_settings_category("ai")

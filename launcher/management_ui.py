@@ -276,40 +276,159 @@ class DependencyDialog(ToolDialog):
     def __init__(self, window, identifier):
         super().__init__(window, '依赖关系与修复', 'dependencies-dialog')
         self.identifier, self.edge = identifier, None
+        self.scanning, self.scan_job, self.scan_generation = False, None, 0
+        self.ai_check = QCheckBox(tr('使用大模型检查'))
+        self.ai_check.setObjectName('dependency-ai-check')
+        self.ai_check.setChecked(window.service.store.config().get('ai_dependency_check', True))
+        self.ai_check.toggled.connect(self.change_mode)
+        self.rescan = Button(tr('重新扫描'), self.reload)
+        self.stop_scan = Button(tr('取消检查'), self.cancel_scan)
+        self.stop_scan.setEnabled(False)
+        self.body.addLayout(row(self.ai_check, self.rescan, self.stop_scan))
+        self.analysis = label('', 'muted', True)
+        self.analysis.setObjectName('dependency-analysis')
+        self.analysis.setTextFormat(Qt.PlainText)
+        self.body.addWidget(self.analysis)
+        self.batch_details = QPlainTextEdit()
+        self.batch_details.setObjectName('dependency-batch-results')
+        self.batch_details.setReadOnly(True)
+        self.batch_details.setMaximumHeight(140)
+        self.batch_details.hide()
+        self.body.addWidget(self.batch_details)
         self.table = tree(['模组 → 依赖', '要求', '当前版本', '状态'], 'dependency-tree')
         self.table.setRootIsDecorated(True)
         self.table.currentItemChanged.connect(self.select_edge)
         self.body.addWidget(self.table)
-        self.body.addLayout(row(Button(tr('重新扫描'), self.reload), Button(tr('启用此前置'), self.enable)))
+        self.enable_button = Button(tr('启用此前置'), self.enable)
         self.provider = combo([('modrinth', 'Modrinth'), ('curseforge', 'CurseForge')])
-        self.body.addLayout(row(self.provider, Button(tr('查找兼容候选'), self.search)))
+        self.search_button = Button(tr('查找兼容候选'), self.search)
+        self.body.addLayout(row(self.provider, self.search_button, self.enable_button))
         self.projects, self.versions = combo([]), combo([])
         self.projects.currentIndexChanged.connect(self.fetch_versions)
         self.body.addLayout(row(self.projects, self.versions))
-        self.footer.addWidget(Button(tr('安装并验证依赖'), self.install, True))
+        self.install_button = Button(tr('安装并验证依赖'), self.install, True)
+        self.footer.addWidget(self.install_button)
         self.body.addWidget(label(tr('候选名称不代表匹配；安装后会核对模组 ID 和版本范围，未满足时恢复原文件。'), 'muted', True))
+        self.body.addWidget(label(tr('大模型共用设置中的接口，仅发送脱敏模组元数据；分析建议不会自动修改模组。'), 'muted', True))
+        self.scan_timer = QTimer(self)
+        self.scan_timer.setInterval(150)
+        self.scan_timer.timeout.connect(self.poll_scan)
+        self.finished.connect(self.cancel_scan)
         QTimer.singleShot(0, self.reload)
 
+    def change_mode(self, enabled):
+        try:
+            config = self.window.service.config_update({'ai_dependency_check': enabled})
+            self.window.data['config'].update(config)
+        except Exception as exc:
+            self.ai_check.blockSignals(True)
+            self.ai_check.setChecked(not enabled)
+            self.ai_check.blockSignals(False)
+            return self.error(str(exc))
+        self.reload()
+
+    def set_scanning(self, active):
+        self.scanning = active
+        for control in (self.ai_check, self.rescan, self.enable_button, self.search_button, self.install_button):
+            control.setEnabled(not active)
+        self.stop_scan.setEnabled(active)
+
+    def cancel_scan(self, *_):
+        self.scan_generation += 1
+        if self.scan_job:
+            task = self.window.service.tasks.tasks.get(self.scan_job)
+            if task: task.cancel.set()
+        self.scan_job = None
+        self.scan_timer.stop()
+        if self.scanning:
+            self.analysis.setText(tr('检查已取消；保留本地依赖结果。'))
+        self.set_scanning(False)
+
     def reload(self):
+        if self.scanning or self.job or not self.isVisible(): return
+        self.scan_generation += 1
+        generation = self.scan_generation
+        self.set_scanning(True)
+        self.batch_details.hide()
+        self.batch_details.clear()
+        self.analysis.setText(tr('正在读取模组依赖…'))
+        def active(): return isValid(self) and self.isVisible() and generation == self.scan_generation
+        def failed(message):
+            if not active(): return
+            self.set_scanning(False)
+            self.analysis.setText(tr('检查失败：{}').format(tr(str(message))))
+        def started(result):
+            if not active():
+                task = self.window.service.tasks.tasks.get(result['task_id'])
+                if task: task.cancel.set()
+                return
+            self.scan_job = result['task_id']
+            self.scan_timer.start()
         def received(data):
-            self.table.clear()
-            parents = {}
-            for node in data['nodes']:
-                key = (node.get('id'), node['file'])
-                status = '已禁用' if node.get('enabled') is False else ('加载器不匹配' if node.get('incompatible_loader') else '')
-                item = QTreeWidgetItem([node.get('id') or node['file'], '', node.get('version', ''), tr(status)])
-                item.setToolTip(0, node['file'])
-                self.table.addTopLevelItem(item)
-                parents[key] = item
-            for edge in data['edges']:
-                parent = next((p for (name, file), p in parents.items() if name == edge['source'] and file.split('!')[0] == edge['file']), None)
-                if parent is None: continue
-                item = QTreeWidgetItem([('↔ ' if edge['kind'] == 'breaks' else '→ ') + edge['target'], str(edge['required']), str(edge['version'] or ''), tr(self.STATUS[edge['status']])])
-                item.setData(0, Qt.UserRole, edge)
-                parent.addChild(item)
-                if edge['status'] != 'ok': parent.setExpanded(True)
-            self.error('\n'.join(tr(i) for i in data['issues'][:5]))
-        self.get('dependencies?' + query(instance=self.identifier), received)
+            if not active(): return
+            self.populate(data)
+            if not self.ai_check.isChecked():
+                return self.show_analysis(dict(data, ai_status='disabled'))
+            if not self.window.service.diagnostics.configured():
+                return self.show_analysis(dict(data, ai_status='not_configured'))
+            self.analysis.setText(tr('大模型正在检查模组依赖'))
+            self.window.request('dependencies/check', {'instance': self.identifier}, success=started, error=failed)
+        self.window.request('dependencies?' + query(instance=self.identifier), success=received, error=failed)
+
+    def poll_scan(self):
+        task = self.window.service.tasks.tasks.get(self.scan_job)
+        if not task: return
+        state = task.public()
+        if state['status'] in ('queued', 'running'):
+            if state.get('message'): self.analysis.setText(tr(state['message']))
+            return
+        self.scan_job = None
+        self.scan_timer.stop()
+        if state['status'] == 'completed':
+            self.populate(state['result'])
+            self.show_analysis(state['result'])
+        else:
+            self.set_scanning(False)
+            self.analysis.setText(tr('检查失败：{}').format(tr(state.get('error') or '任务已取消')))
+
+    def show_analysis(self, data):
+        self.set_scanning(False)
+        messages = {
+            'disabled': '已使用本地元数据检查。',
+            'not_configured': '尚未配置大模型；已显示本地结果。请在设置 → 智能排查中填写接口地址、模型和 API Key。',
+            'failed': '大模型检查失败，已保留本地结果：{}',
+            'stale': '检查期间模组发生变化，已刷新本地结果；请重新运行大模型检查。',
+        }
+        status = data['ai_status']
+        if status == 'completed':
+            report = data['analysis']
+            state = tr({'ok': '未发现明确问题', 'risk': '发现风险', 'unknown': '无法确认'}.get(report['status'], '无法确认'))
+            self.analysis.setText(tr('大模型检查：{}\n原因：{}\n建议：{}').format(state, report['cause'], report['suggestion']))
+            if report.get('batch_reports'):
+                self.analysis.setText(self.analysis.text() + '\n' + tr('已完成 {} / {} 批检查').format(report['completed_batches'], report['batch_count']))
+                self.batch_details.setPlainText('\n\n'.join(tr('第 {} 批\n原因：{}\n建议：{}').format(item['batch'], item['cause'], item['suggestion']) for item in report['batch_reports']))
+                self.batch_details.show()
+        else:
+            self.analysis.setText(tr(messages[status]).format(tr(data.get('ai_error', ''))))
+
+    def populate(self, data):
+        self.table.clear()
+        parents = {}
+        for node in data['nodes']:
+            key = (node.get('id'), node['file'])
+            status = '已禁用' if node.get('enabled') is False else ('加载器不匹配' if node.get('incompatible_loader') else '')
+            item = QTreeWidgetItem([node.get('id') or node['file'], '', node.get('version', ''), tr(status)])
+            item.setToolTip(0, node['file'])
+            self.table.addTopLevelItem(item)
+            parents[key] = item
+        for edge in data['edges']:
+            parent = next((p for (name, file), p in parents.items() if name == edge['source'] and file.split('!')[0] == edge['file']), None)
+            if parent is None: continue
+            item = QTreeWidgetItem([('↔ ' if edge['kind'] == 'breaks' else '→ ') + edge['target'], str(edge['required']), str(edge['version'] or ''), tr(self.STATUS[edge['status']])])
+            item.setData(0, Qt.UserRole, edge)
+            parent.addChild(item)
+            if edge['status'] != 'ok': parent.setExpanded(True)
+        self.error('\n'.join(tr(i) for i in data['issues'][:5]))
 
     def select_edge(self, item, previous=None):
         self.edge = item.data(0, Qt.UserRole) if item else None
@@ -336,10 +455,12 @@ class DependencyDialog(ToolDialog):
         self.get('content/versions?' + query(instance=self.identifier, project=selected[0], provider=selected[1], kind='mod'), received)
 
     def enable(self):
+        if self.scanning: return
         if not self.edge or not self.edge.get('disabled_file'): return self.error(tr('请选择已禁用的依赖'))
         self.run('dependencies/repair', {'instance': self.identifier, 'dependency': self.edge['target'], 'disabled_file': self.edge['disabled_file']}, lambda _: self.reload())
 
     def install(self):
+        if self.scanning: return
         selected = self.projects.currentData()
         if not self.edge or not selected or not self.versions.currentData(): return self.error(tr('请选择候选项目及版本'))
         self.run('dependencies/repair', {'instance': self.identifier, 'dependency': self.edge['target'], 'provider': selected[1], 'project': selected[0], 'version': self.versions.currentData()}, lambda _: self.reload())

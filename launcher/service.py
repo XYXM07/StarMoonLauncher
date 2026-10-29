@@ -39,10 +39,14 @@ class Application:
         self.diagnostic_jobs = {}
         self.game.on_exit = self.on_game_exit
         self.updater = UpdateManager(self.store, self.net)
+        from .server_list import ServerList
+        from .local_servers import LocalServers
+        self.servers = ServerList(self.store)
+        self.local_servers = LocalServers(self)
 
     def state(self):
         return {"config": self.store.public_config(), "instances": self.store.instances(),
-                "tasks": self.tasks.list(), "processes": self.game.process_status(),
+                "tasks": self.tasks.list(), "processes": self.game.process_status(), "server_processes": self.local_servers.active(),
                 "data_path": str(self.store.root), "minecraft_path": str(self.store.selected_minecraft()),
                 "minecraft_folders": self.store.folders(), "version": __version__}
 
@@ -54,7 +58,7 @@ class Application:
 
     def config_update(self, changes):
         allowed = {"source", "memory", "memory_auto", "java_path", "java_auto", "width", "height", "jvm_args", "game_args", "client_id", "curseforge_key", "concurrency", "selected_instance", "selected_account", "theme", "animations", "login_mode", "offline_name", "background_path", "background_opacity", "glass_opacity", "glass_refraction", "download_parallel", "download_segments", "launcher_width", "launcher_height"}
-        allowed.update(("color_scheme","ai_base_url","ai_model","ai_crash_analysis","ai_auto_preflight","ai_github_search","ai_pack_download_fallback"))
+        allowed.update(("color_scheme","ai_base_url","ai_model","ai_crash_analysis","ai_auto_preflight","ai_dependency_check","ai_github_search","ai_pack_download_fallback"))
         allowed.update(("background_mode","background_preset"))
         allowed.add("language")
         allowed.add("auto_check_updates")
@@ -71,7 +75,7 @@ class Application:
             raise LauncherError("未知预设壁纸")
         if "color_scheme" in changes and changes["color_scheme"] not in ("starmoon","aurora","morandi","graphite","glacier","twilight","night"):
             raise LauncherError("未知配色")
-        for key in ("ai_crash_analysis","ai_auto_preflight","auto_check_updates","ai_github_search","ai_pack_download_fallback"):
+        for key in ("ai_crash_analysis","ai_auto_preflight","ai_dependency_check","auto_check_updates","ai_github_search","ai_pack_download_fallback"):
             if key in changes: changes[key] = bool(changes[key])
         if "ai_base_url" in changes:
             changes["ai_base_url"] = str(changes["ai_base_url"]).strip().rstrip("/")
@@ -102,11 +106,14 @@ class Application:
         self.store.save(changes)
         return self.store.public_config()
 
-    def start_game(self,instance_id,account_id,task,skip_preflight=False):
+    def start_game(self,instance_id,account_id,task,skip_preflight=False,server=None):
+        if server:
+            from .server_list import address
+            server = address(server)['address']
         with self.management.runtime_lock, self.management.guard(instance_id, launching=True):
-            return self._start_game(instance_id, account_id, task, skip_preflight)
+            return self._start_game(instance_id, account_id, task, skip_preflight, server)
 
-    def _start_game(self,instance_id,account_id,task,skip_preflight=False):
+    def _start_game(self,instance_id,account_id,task,skip_preflight=False,server=None):
         if self.store.config().get("ai_auto_preflight") and not skip_preflight:
             task.update("启动前智能排查",1)
             try:
@@ -116,9 +123,9 @@ class Application:
             except LauncherError as exc:
                 report = self.diagnostic_error(instance_id,"preflight",str(exc))
             if report["status"] != "ok":
-                return {"launch_blocked":True,"diagnostic_report":report,"resume_account":account_id}
+                return {"launch_blocked":True,"diagnostic_report":report,"resume_account":account_id,"resume_server":server}
         try:
-            return self.game.launch(instance_id,account_id,task)
+            return self.game.launch(instance_id,account_id,task,server=server) if server else self.game.launch(instance_id,account_id,task)
         except Cancelled:
             raise
         except Exception as exc:
@@ -163,6 +170,13 @@ class Application:
         def q(key, default=""):
             return query.get(key, [default])[0]
         if method == "GET":
+            if path == '/api/servers': return self.servers.list()
+            if path == '/api/servers/status':
+                from .server_list import status
+                return status(q('address'))
+            if path == '/api/local-servers': return self.local_servers.list()
+            if path == '/api/local-servers/config': return self.local_servers.config(q('id'))
+            if path == '/api/local-servers/console': return self.local_servers.console(q('id'), max(0, int(q('after', '0'))), q('run_id'))
             if path == '/api/management/history':
                 from .management import history
                 return history(self.store, q('instance'))
@@ -213,6 +227,17 @@ class Application:
                 directory = self.store.instance_dir(q("instance")) / "backups"
                 return [{"name": p.name, "size": p.stat().st_size, "date": p.stat().st_mtime} for p in sorted(directory.glob("*.zip"), reverse=True)]
         if method == "POST":
+            if path == '/api/servers/save': return self.servers.save(body)
+            if path == '/api/servers/remove': return self.servers.remove(body['id'])
+            if path == '/api/local-servers/import': return self.local_servers.register(body)
+            if path == '/api/local-servers/create':
+                return self.tasks.submit('下载原版服务端', lambda t: self.local_servers.create(body, t))
+            if path == '/api/local-servers/save': return self.local_servers.save(body['id'], body)
+            if path == '/api/local-servers/remove': return self.local_servers.remove(body['id'])
+            if path == '/api/local-servers/start':
+                return self.tasks.submit('启动本地服务端', lambda t: self.local_servers.start(body['id'], t))
+            if path == '/api/local-servers/stop': return self.local_servers.stop(body['id'], body.get('force') is True)
+            if path == '/api/local-servers/command': return self.local_servers.command(body['id'], body['command'])
             if path == '/api/content/identify':
                 from .management import identify_mods
                 return self.tasks.submit('识别模组更新来源', lambda t: identify_mods(self, body['instance'], t))
@@ -228,6 +253,9 @@ class Application:
             if path == '/api/pack/upgrade':
                 from .pack_updates import upgrade
                 return self.tasks.submit('升级整合包', lambda t: upgrade(self, body['instance'], body['provider'], body['project'], body['version'], body.get('current_version'), t))
+            if path == '/api/dependencies/check':
+                from .dependencies import check
+                return self.tasks.submit('检查模组依赖', lambda t: check(self, body['instance'], t))
             if path == '/api/dependencies/repair':
                 from .dependencies import repair
                 return self.tasks.submit('修复模组依赖', lambda t: repair(self, body['instance'], body['dependency'], body.get('project'), body.get('version'), body.get('provider'), body.get('disabled_file'), t))
@@ -293,7 +321,7 @@ class Application:
                 self.running_check(body["id"])
                 return self.tasks.submit("修复游戏文件", lambda t: self.management.run(body['id'], self.game.install, body['id'], t))
             if path == "/api/instances/launch":
-                return self.tasks.submit("启动游戏", lambda t: self.start_game(body["id"],body["account"],t,bool(body.get("skip_preflight"))))
+                return self.tasks.submit("启动游戏", lambda t: self.start_game(body["id"],body["account"],t,bool(body.get("skip_preflight")),body.get('server')))
             if path == "/api/instances/stop":
                 self.game.stop(body["id"])
                 return {}

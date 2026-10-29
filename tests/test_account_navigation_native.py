@@ -35,14 +35,14 @@ class AccountNavigationTests(unittest.TestCase):
         self.assertTrue(self.window.top_buttons["settings"].isChecked())
         self.assertTrue(self.account_category().primary)
 
-    def test_more_has_only_activity_and_about_and_home_shortcut_opens_settings(self):
+    def test_more_has_servers_activity_and_about_and_home_shortcut_opens_settings(self):
         QTest.mouseClick(next(button for button in self.window.sidebar.findChildren(Button) if button.text() == "账号管理"), Qt.LeftButton)
         self.assert_account_settings()
         self.assertTrue(any(label.text() == "ManagePlayer" for label in self.window.page.findChildren(QLabel)))
         self.assertFalse(any(button.text() == "账号管理" for button in self.window.page.findChildren(Button)))
         QTest.mouseClick(self.window.top_buttons["more"], Qt.LeftButton)
         self.assertEqual(self.window.page_id, "downloads")
-        self.assertEqual(set(self.window.nav_buttons), {"downloads", "about"})
+        self.assertEqual(set(self.window.nav_buttons), {"servers", "downloads", "about"})
         self.assertFalse(any(button.text() == "账号管理" and button.isVisible() for button in self.window.sidebar.findChildren(Button)))
 
     def test_sidebar_account_category_shows_management_directly_and_legacy_route_redirects(self):

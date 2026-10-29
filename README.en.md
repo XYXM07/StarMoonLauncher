@@ -1,18 +1,20 @@
 # StarMoonLauncher
 
-Version 0.7.8 adds bulk mod management, staged in-place modpack updates with rollback, dependency inspection and repair, a Java manager, and searchable logs with redacted local problem reports. See the [management guide (Chinese)](docs/MANAGEMENT.md).
+Version 0.7.9 adds saved-server and local-hosting management, batched AI dependency checks, bundled CurseForge access, and stable search-result widths. See the [server guide (Chinese)](docs/SERVERS.md) and [management guide (Chinese)](docs/MANAGEMENT.md).
 
 [简体中文](README.md)
 
 A native Windows launcher for Minecraft: Java Edition, created by **星月晓梦**. Built with Python and PySide6, with a frameless liquid glass interface and a single-file EXE build.
 
-Current version: **0.7.8**. [Download for Windows x64](https://github.com/XYXM07/StarMoonLauncher/releases/download/v0.7.8/StarMoonLauncher-0.7.8-windows-x64.exe) · [Releases](https://github.com/XYXM07/StarMoonLauncher/releases).
+Current version: **0.7.9**. [Download for Windows x64](https://github.com/XYXM07/StarMoonLauncher/releases/download/v0.7.9/StarMoonLauncher-0.7.9-windows-x64.exe) · [Releases](https://github.com/XYXM07/StarMoonLauncher/releases).
 
 The launcher supports **Simplified Chinese and English**. Open **Settings → Appearance → Language** to switch immediately. The choice is saved for the next launch.
 
 Launcher updates are checked against this project's stable GitHub Releases. Use **About → Check launcher updates**, or enable startup checks under **Settings → Advanced**. Downloads show progress and speed and require SHA-256 verification. Installation waits for games and other tasks to finish, replaces the EXE in place, retains a backup, and restarts with the same data folder. See [update details](docs/UPDATING.md).
 
 Features include Microsoft sign-in through Windows Web Account Manager, offline accounts, game installation, version and mod management, modpack import and export, official and BMCLAPI download sources, parallel downloads, custom skins and wallpapers, multiple game sessions, and optional AI diagnostics.
+
+Open **More → Server manager** to save server addresses, check status and join with a selected game version; import or download local Java servers, view console output, send commands, edit settings and stop gracefully. See the [server guide (Chinese)](docs/SERVERS.md).
 
 Version 0.7.8 adds OptiFine, Cleanroom and LiteLoader installation, data pack and map downloads, custom game window titles, screenshot browsing, and configurable pack export content, formats and output folders. See [instance tools](docs/INSTANCE_FEATURES.md).
 
@@ -32,7 +34,7 @@ Mod management filters all, enabled or disabled mods together with text search. 
 
 Drop local `.mrpack` or `.zip` modpacks onto the main window to queue installations, including multiple files. A failed installation shows an error dialog and removes only its newly created instance and temporary files. Original archives, existing games and worlds are preserved. AI recovery reports success only after the selected file passes integrity checks and is committed.
 
-The publisher has confirmed that the application's Minecraft Services access review has been approved. Players still need Minecraft: Java Edition ownership and an Xbox profile. Sign-in errors identify the failed authorization stage and error code. CurseForge requires your own API key.
+The publisher has confirmed that the application's Minecraft Services access review has been approved. Players still need Minecraft: Java Edition ownership and an Xbox profile. Sign-in errors identify the failed authorization stage and error code. Official builds include a CurseForge API key, with an optional custom-key override in Settings.
 
 The launcher creates a `.minecraft` folder only when requested in **Versions**. Existing game folders are referenced in place. **Scan .minecraft folders** searches local disks or a selected directory; choose the folders to add. Version names, player names, file paths and original logs retain their original text when switching languages.
 
@@ -47,7 +49,7 @@ py -3.11 -m venv .venv
 Build and test:
 
 ```powershell
-.\.venv\Scripts\python.exe build.py --output-name StarMoonLauncher-0.7.8-windows-x64
+.\.venv\Scripts\python.exe build.py --output-name StarMoonLauncher-0.7.9-windows-x64
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 

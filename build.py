@@ -3,7 +3,6 @@ import json
 import argparse
 import os
 import sys
-import uuid
 from pathlib import Path
 root = Path(__file__).resolve().parent
 parser = argparse.ArgumentParser()
@@ -32,12 +31,8 @@ version_info = VSVersionInfo(
         StringStruct("OriginalFilename", output_name + ".exe"), StringStruct("ProductName", "StarMoonLauncher"),
         StringStruct("ProductVersion", __version__)])]), VarFileInfo([VarStruct("Translation", [1033, 1200])])])
 version_file.write_text(str(version_info), encoding="utf-8")
-settings_path = root / "publisher.json"
-settings = json.loads(settings_path.read_text(encoding="utf-8-sig")) if settings_path.is_file() else {}
-client_id = (os.environ.get("BLOCKCRAFT_MS_CLIENT_ID") or settings.get("microsoft_client_id", "")).strip()
-if client_id:
-    client_id = str(uuid.UUID(client_id))
-publisher.write_text(json.dumps({"microsoft_client_id": client_id}), encoding="utf-8")
+from launcher.publisher import build_settings
+publisher.write_text(json.dumps(build_settings(root)), encoding="utf-8")
 PyInstaller.__main__.run([
     "--noconfirm", "--clean", "--onefile", "--windowed", "--name", output_name,
     "--icon", str(root / "assets" / "starmoon.ico"),

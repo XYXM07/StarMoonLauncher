@@ -43,7 +43,7 @@ from .widgets import Button, ElidedLabel, GlassFrame, NavigationSwitch, PageHost
 PAGES = [("home", "", "启动"), ("library", "", "版本选择"),
          ("install", "", "自动安装"), ("discover", "", "模组"),
          ("downloads", "", "正在运行"),
-         ("settings", "", "设置"), ("about", "", "关于")]
+         ("settings", "", "设置"), ("servers", "", "服务器管理"), ("about", "", "关于")]
 LOADERS = {"vanilla": "原版", "fabric": "Fabric", "quilt": "Quilt", "forge": "Forge", "neoforge": "NeoForge", "optifine": "OptiFine", "cleanroom": "Cleanroom", "liteloader": "LiteLoader"}
 KINDS = {"mod": "模组", "modpack": "整合包", "resourcepack": "资源包", "shader": "光影", "datapack": "数据包", "map": "地图"}
 STATUS = {"queued": "等待中", "running": "进行中", "completed": "已完成", "failed": "失败", "cancelled": "已取消"}
@@ -775,7 +775,7 @@ class LauncherWindow(LiveSettings, QMainWindow):
                 self.side_layout.addWidget(button)
             self.side_layout.addStretch()
             return
-        for key, text in (("downloads", tr("正在运行")), ("about", tr("关于"))):
+        for key, text in (("servers", tr("服务器管理")), ("downloads", tr("正在运行")), ("about", tr("关于"))):
             button = Button(text, lambda checked=False, page=key: self.navigate(page), self.page_id == key)
             button.setObjectName("side-" + key)
             self.nav_buttons[key] = button
@@ -1083,7 +1083,7 @@ class LauncherWindow(LiveSettings, QMainWindow):
         if self.page_id == "home":
             self.update_launch_panel()
         active = [t for t in self.data["tasks"] if t["status"] in ("running", "queued")]
-        count = len(active) + sum(1 for p in self.data["processes"] if p["running"])
+        count = len(active) + sum(1 for p in self.data["processes"] if p["running"]) + len(self.data.get('server_processes', []))
         self.download_button.setText("◷ " + str(count) if count else "◷")
         if self.page_id == "settings" and self.settings_category == "game":
             self.update_memory_preview()
@@ -1109,8 +1109,8 @@ class LauncherWindow(LiveSettings, QMainWindow):
                     self.notified_diagnostics.add(task["id"])
                     if self.background_mode:
                         self.restore_window()
-                    self.show_diagnostic(result["diagnostic_report"],result.get("resume_account") if result.get("launch_blocked") else None)
-            if self.background_mode and not any(t["status"] in ("running", "queued") for t in self.data["tasks"]) and not any(p["running"] or not p.get("finalized",True) for p in self.data["processes"]):
+                    self.show_diagnostic(result["diagnostic_report"],result.get("resume_account") if result.get("launch_blocked") else None,result.get('resume_server'))
+            if self.background_mode and not self.data.get('server_processes') and not any(t["status"] in ("running", "queued") for t in self.data["tasks"]) and not any(p["running"] or not p.get("finalized",True) for p in self.data["processes"]):
                 self.tray.hide()
                 self.timer.stop()
                 QApplication.instance().quit()
@@ -1284,6 +1284,12 @@ class LauncherWindow(LiveSettings, QMainWindow):
             self.install_version = item.data(Qt.UserRole)
             self.navigate("install", False)
 
+    def page_servers(self, layout):
+        from .server_ui import ServerPanel
+        self.intro(layout, tr('服务器管理'))
+        self.server_panel = ServerPanel(self)
+        layout.addWidget(self.server_panel, 1)
+
     def page_about(self, layout):
         self.intro(layout, tr("星月启动器 {}").format(__version__))
         frame, box = card()
@@ -1370,6 +1376,7 @@ class LauncherWindow(LiveSettings, QMainWindow):
         self.intro(layout, tr("正在运行"), actions=[self.clear_finished_button])
         self.task_rows = {}
         self.process_rows = {}
+        self.server_task_signature = None
         self.tasks_layout = QVBoxLayout()
         self.tasks_layout.setSpacing(14)
         layout.addLayout(self.tasks_layout)
@@ -1405,13 +1412,22 @@ class LauncherWindow(LiveSettings, QMainWindow):
     def update_tasks(self):
         tasks = self.data["tasks"]
         processes = self.data["processes"]
+        servers = self.data.get('server_processes', [])
+        server_signature = [(item['id'], item['state']) for item in servers]
         self.clear_finished_button.setEnabled(any(t["status"] not in ("running", "queued") for t in tasks) or any(not p["running"] for p in processes))
-        if set(self.task_rows) != {t["id"] for t in tasks} or set(self.process_rows) != {p.get("id",p["instance_id"]) for p in processes}:
+        if self.server_task_signature != server_signature or set(self.task_rows) != {t["id"] for t in tasks} or set(self.process_rows) != {p.get("id",p["instance_id"]) for p in processes}:
+            self.server_task_signature = server_signature
             clear_layout(self.tasks_layout)
             self.task_rows = {}
             self.process_rows = {}
-            if not tasks and not processes:
+            if not tasks and not processes and not servers:
                 self.tasks_layout.addWidget(empty(tr("暂无任务"), ""))
+            for server in servers:
+                from .server_ui import LocalServerDialog, STATES
+                frame, box = card()
+                box.addLayout(row(ElidedLabel(server['name'], 'section'), label(tr(STATES[server['state']]), 'badge')))
+                box.addWidget(Button(tr('控制台与配置'), lambda checked=False, identifier=server['id']: self.open_dialog(LocalServerDialog(self, identifier))))
+                self.tasks_layout.addWidget(frame)
             for process in processes:
                 frame, box = card()
                 instance_id = process["instance_id"]
@@ -1484,6 +1500,13 @@ class LauncherWindow(LiveSettings, QMainWindow):
             close.setVisible(task["status"] not in ("running", "queued"))
 
     def page_discover(self, layout):
+        # Keep the viewport width stable when replacing a long list with the
+        # loading indicator, a short list or an empty result.
+        self.page.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
+        bar = self.page.verticalScrollBar()
+        bar.setStyleSheet('QScrollBar::handle:disabled { background: transparent; }')
+        bar.rangeChanged.connect(lambda minimum, maximum: bar.setEnabled(maximum > minimum))
+        bar.setEnabled(bar.maximum() > bar.minimum())
         state = self.search_state
         choices = content_sources(state["kind"])
         if state["provider"] not in dict(choices):
@@ -1512,6 +1535,8 @@ class LauncherWindow(LiveSettings, QMainWindow):
         self.content_instance.currentIndexChanged.connect(self.content_filter_changed)
         self.content_query.returnPressed.connect(self.search_content)
         self.content_result = QWidget()
+        self.content_result.setMinimumWidth(0)
+        self.content_result.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.content_result_layout = QVBoxLayout(self.content_result)
         self.content_result_layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self.content_result)
@@ -1558,7 +1583,8 @@ class LauncherWindow(LiveSettings, QMainWindow):
             for index, project in enumerate(data["hits"]):
                 frame, box = card()
                 frame.setObjectName("project-card")
-                frame.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+                frame.setMinimumWidth(0)
+                frame.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Maximum)
                 box.setContentsMargins(16, 16, 16, 16)
                 line = QHBoxLayout()
                 line.setSpacing(14)
@@ -1675,7 +1701,9 @@ class LauncherWindow(LiveSettings, QMainWindow):
         self.download_parallel.toggled.connect(segments.setEnabled)
         self.settings_fields["download_segments"] = segments
         box.addWidget(field(tr("每个大文件分段数"),segments))
-        key = text_input(placeholder=tr("已保存；留空保留") if config["curseforge_configured"] else tr("输入 CurseForge API Key"))
+        placeholder = ("已保存；留空保留" if config.get("curseforge_custom_configured") else
+                       "已内置；可填写自定义密钥" if config.get("curseforge_builtin") else "输入 CurseForge API Key")
+        key = text_input(placeholder=tr(placeholder))
         key.setEchoMode(QLineEdit.Password)
         key.setText(config.get("curseforge_key", ""))
         self.settings_fields["curseforge_key"] = key
@@ -1774,6 +1802,11 @@ class LauncherWindow(LiveSettings, QMainWindow):
         self.ai_preflight_check.setObjectName("ai-auto-preflight")
         self.ai_preflight_check.setChecked(config.get("ai_auto_preflight",False))
         box.addWidget(self.ai_preflight_check)
+        dependency_check = QCheckBox(tr("模组依赖默认使用大模型检查"))
+        dependency_check.setObjectName("ai-dependency-check")
+        dependency_check.setChecked(config.get("ai_dependency_check", True))
+        self.settings_fields["ai_dependency_check"] = dependency_check
+        box.addWidget(dependency_check)
         for key, title in (("ai_github_search", tr("AI 搜索 GitHub 模组")),
                            ("ai_pack_download_fallback", tr("整合包下载失败时使用 AI 补下载"))):
             widget = QCheckBox(title)
@@ -1782,7 +1815,7 @@ class LauncherWindow(LiveSettings, QMainWindow):
             self.settings_fields[key] = widget
             box.addWidget(widget)
         box.addWidget(label(tr("共用以上模型和 API。优先检索 MC百科及其项目链接，补下载保留原文件哈希校验。"), "muted", True))
-        box.addWidget(label(tr("发送启用模组的元数据与相关错误日志，过滤令牌、账号和常见个人路径。静态排查无法保证发现所有运行期冲突。"),"muted",True))
+        box.addWidget(label(tr("发送脱敏模组元数据；崩溃分析还会发送相关错误日志。过滤令牌、账号和常见个人路径。静态排查无法保证发现所有运行期冲突。"),"muted",True))
         box.addLayout(row(Button(tr("测试连接"),self.test_ai_connection),Button(tr("查看上次结果"),self.show_latest_diagnostic),None))
         section, box = card()
         if category != "advanced":
@@ -2048,7 +2081,7 @@ class LauncherWindow(LiveSettings, QMainWindow):
         if process_id: body["process"] = process_id
         self.mutate("diagnostics/run",body,show_tasks=True)
 
-    def show_diagnostic(self,report,resume_account=None):
+    def show_diagnostic(self,report,resume_account=None,resume_server=None):
         instance_id = report.get("instance_id","")
         try:
             name = self.service.store.instance(instance_id)["name"]
@@ -2070,7 +2103,9 @@ class LauncherWindow(LiveSettings, QMainWindow):
         if resume_account:
             def proceed():
                 dialog.accept()
-                self.mutate("instances/launch",{"id":instance_id,"account":resume_account,"skip_preflight":True},show_tasks=True)
+                payload = {"id":instance_id,"account":resume_account,"skip_preflight":True}
+                if resume_server: payload['server'] = resume_server
+                self.mutate("instances/launch",payload,show_tasks=True)
             resume = Button(tr("仍然启动"),proceed,True)
             resume.setObjectName("diagnostic-launch-anyway")
             dialog.footer.addWidget(resume)
@@ -2213,6 +2248,7 @@ class LauncherWindow(LiveSettings, QMainWindow):
         self.async_call(self.service.updater.check, checked, failed)
 
     def update_block_reason(self):
+        if self.service.local_servers.active(): return '请先停止所有本地服务端，再安装启动器更新'
         if any(process["running"] or not process.get("finalized", True) for process in self.service.game.process_status()):
             return "请先关闭所有游戏，再安装启动器更新"
         if any(task["status"] in ("queued", "running") for task in self.service.tasks.list()):
@@ -2255,7 +2291,7 @@ class LauncherWindow(LiveSettings, QMainWindow):
         viewer.setReadOnly(True)
         viewer.setMinimumHeight(390)
         text = []
-        for name in ("NOTICE.txt", "LGPL-3.0.txt", "GPL-3.0.txt", "Python.txt", "OpenSSL.txt", "PyInstaller.txt", "MSAL-and-dependencies.txt", "authlib-injector.txt", "authlib-injector-COPYING.md", "tomli.txt"):
+        for name in ("NOTICE.txt", "LGPL-3.0.txt", "GPL-3.0.txt", "Python.txt", "OpenSSL.txt", "PyInstaller.txt", "MSAL-and-dependencies.txt", "authlib-injector.txt", "authlib-injector-COPYING.md", "tomli.txt", "dnspython.txt"):
             if (directory / name).is_file():
                 text.append("\n=== " + name + " ===\n\n" + (directory / name).read_text(encoding="utf-8", errors="replace"))
         viewer.setPlainText("\n".join(text))
@@ -2292,7 +2328,7 @@ class LauncherWindow(LiveSettings, QMainWindow):
                 return
             for task in active:
                 self.service.tasks.cancel_task(task["id"])
-        if any(p["running"] for p in self.data["processes"]):
+        if self.data.get('server_processes') or any(p["running"] for p in self.data["processes"]):
             self.hide_to_background()
             event.ignore()
             return

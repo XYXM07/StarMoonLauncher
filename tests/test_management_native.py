@@ -1,4 +1,5 @@
 import json
+import threading
 import time
 import unittest
 import zipfile
@@ -10,6 +11,7 @@ from PySide6.QtCore import Qt
 from launcher.management_ui import BulkModsDialog, DependencyDialog, JavaDialog, PackUpgradeDialog, PackReviewDialog, LogPanel
 from launcher.widgets import Button
 from launcher.i18n import set_language
+from launcher.core import LauncherError
 
 
 class ManagementNativeTests(unittest.TestCase):
@@ -86,6 +88,104 @@ class ManagementNativeTests(unittest.TestCase):
         self.assertTrue(all(item.childCount() == 0 for item in items))
         dialog.table.setCurrentItem(items[0])
         self.assertIsNone(dialog.edge)
+
+    def test_dependency_ai_default_results_failure_and_mode_persistence(self):
+        identifier = self.instance()
+        self.service.config_update({'ai_base_url': 'http://127.0.0.1:1/v1', 'ai_model': 'fixture'})
+        report = {'source': 'ai', 'status': 'risk', 'cause': '前置 b 未启用', 'suggestion': '启用 b 后重试'}
+        with patch.object(self.service.diagnostics, '_request', return_value=report) as request:
+            dialog = self.window.open_dialog(DependencyDialog(self.window, identifier))
+            wait_for(lambda: '启用 b 后重试' in dialog.analysis.text())
+            self.assertTrue(dialog.ai_check.isChecked())
+            self.assertEqual(request.call_count, 1)
+            self.assertTrue(dialog.rescan.isEnabled())
+        with patch.object(self.service.diagnostics, '_request', side_effect=LauncherError('fixture offline')):
+            dialog.reload()
+            wait_for(lambda: 'fixture offline' in dialog.analysis.text())
+            self.assertEqual(dialog.table.topLevelItem(0).child(0).text(3), '已禁用')
+        with patch.object(self.service.diagnostics, '_request') as request:
+            dialog.ai_check.setChecked(False)
+            wait_for(lambda: '已使用本地元数据' in dialog.analysis.text())
+            self.assertFalse(self.service.store.config()['ai_dependency_check'])
+            dialog.reject()
+            reopened = self.window.open_dialog(DependencyDialog(self.window, identifier))
+            wait_for(lambda: '已使用本地元数据' in reopened.analysis.text())
+            self.assertFalse(reopened.ai_check.isChecked())
+            request.assert_not_called()
+
+    def test_dependency_ai_cancel_does_not_apply_late_result(self):
+        identifier = self.instance()
+        self.service.config_update({'ai_base_url': 'http://127.0.0.1:1/v1', 'ai_model': 'fixture'})
+        entered, release = threading.Event(), threading.Event()
+        def slow(*args, **kwargs):
+            entered.set()
+            release.wait(3)
+            kwargs['task'].check()
+            return {'status': 'ok', 'cause': 'late result', 'suggestion': 'unused'}
+        with patch.object(self.service.diagnostics, '_request', side_effect=slow) as request:
+            dialog = self.window.open_dialog(DependencyDialog(self.window, identifier))
+            try:
+                wait_for(lambda: entered.is_set() and dialog.scan_job is not None)
+                job = self.service.tasks.tasks[dialog.scan_job]
+                self.assertEqual(dialog.table.topLevelItemCount(), 2)
+                self.assertFalse(dialog.install_button.isEnabled())
+                dialog.reload()
+                self.assertEqual(request.call_count, 1)
+                dialog.cancel_scan()
+                release.set()
+                wait_for(lambda: bool(job.finished))
+                self.assertEqual(job.status, 'cancelled')
+                self.assertIn('检查已取消', dialog.analysis.text())
+                self.assertNotIn('late result', dialog.analysis.text())
+                self.assertTrue(dialog.ai_check.isEnabled())
+            finally:
+                release.set()
+
+    def test_dependency_batch_progress_and_all_results_are_visible(self):
+        identifier = self.instance()
+        self.service.config_update({'ai_base_url': 'http://127.0.0.1:1/v1', 'ai_model': 'fixture'})
+        entered, release = threading.Event(), threading.Event()
+        def review(*args, **kwargs):
+            kwargs['task'].update('大模型检查：第 2 / 3 批', 50)
+            entered.set()
+            release.wait(4)
+            return {'status': 'risk', 'cause': 'last risk', 'suggestion': 'last fix', 'source': 'ai',
+                    'batch_count': 3, 'completed_batches': 3, 'batch_reports': [
+                        {'batch': i, 'status': 'risk', 'cause': 'risk_' + str(i), 'suggestion': 'fix_' + str(i)} for i in (1, 2, 3)]}
+        with patch.object(self.service.diagnostics, '_request', side_effect=review):
+            dialog = self.window.open_dialog(DependencyDialog(self.window, identifier))
+            try:
+                wait_for(lambda: entered.is_set() and '2 / 3' in dialog.analysis.text())
+                release.set()
+                wait_for(lambda: not dialog.scanning)
+                self.assertIn('已完成 3 / 3', dialog.analysis.text())
+                self.assertTrue(dialog.batch_details.isVisible())
+                self.assertIn('risk_1', dialog.batch_details.toPlainText())
+                self.assertIn('fix_3', dialog.batch_details.toPlainText())
+                dialog.ai_check.setChecked(False)
+                wait_for(lambda: not dialog.scanning)
+                self.assertFalse(dialog.batch_details.isVisible())
+            finally:
+                release.set()
+
+    def test_dependency_ai_english_compact_and_settings_switch(self):
+        set_language('en_US')
+        self.addCleanup(set_language, 'zh_CN')
+        self.service.config_update({'language': 'en_US'})
+        identifier = self.instance()
+        self.window.resize(900, 600)
+        dialog = self.window.open_dialog(DependencyDialog(self.window, identifier))
+        wait_for(lambda: 'AI is not configured' in dialog.analysis.text())
+        self.assertEqual(dialog.ai_check.text(), 'Use AI analysis')
+        for button in (dialog.rescan, dialog.stop_scan, dialog.install_button):
+            self.assertLessEqual(button.mapTo(dialog, button.rect().bottomRight()).x(), dialog.width())
+        self.assertLessEqual(dialog.install_button.mapTo(dialog, dialog.install_button.rect().bottomRight()).y(), dialog.height())
+        dialog.reject()
+        self.window.navigate('settings')
+        check = self.window.settings_fields['ai_dependency_check']
+        self.assertTrue(check.isChecked())
+        check.setChecked(False)
+        self.assertFalse(self.service.store.config()['ai_dependency_check'])
 
     def test_pack_versions_and_review_buttons_fit_compact(self):
         identifier = self.instance()

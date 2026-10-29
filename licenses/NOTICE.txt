@@ -14,3 +14,7 @@ authlib-injector 1.2.8, Copyright its contributors, unmodified official binary.
 AGPLv3 or later with the AUTHLIB-INJECTOR exception; license and bundled dependencies: authlib-injector.txt and authlib-injector-COPYING.md.
 Source and corresponding release: https://github.com/yushijinhun/authlib-injector/tree/v1.2.8
 Bundled SHA-256: 9c7f4343e6c82034958ffb48c14a2cb0c85928be7283103ce17da00c6d5a7b10
+
+dnspython 2.6.1, Bob Halley and contributors. ISC License.
+Source: https://github.com/rthalley/dnspython/tree/v2.6.1
+License: dnspython.txt

@@ -15,10 +15,10 @@ py -3.11 -m venv .venv
 ## 构建单文件 EXE
 
 ```powershell
-.\.venv\Scripts\python.exe build.py --output-name StarMoonLauncher-0.7.8-windows-x64
+.\.venv\Scripts\python.exe build.py --output-name StarMoonLauncher-0.7.9-windows-x64
 ```
 
-输出为 `dist/StarMoonLauncher-0.7.8-windows-x64.exe`，Windows 文件属性中的版本号与 `launcher/__init__.py` 保持一致。构建脚本一并内置图标、六张预设壁纸、WAM 运行库、离线皮肤代理和第三方许可。无需 Node.js、浏览器前端或额外运行库目录。
+输出为 `dist/StarMoonLauncher-0.7.9-windows-x64.exe`，Windows 文件属性中的版本号与 `launcher/__init__.py` 保持一致。构建脚本一并内置图标、六张预设壁纸、WAM 运行库、离线皮肤代理和第三方许可。无需 Node.js、浏览器前端或额外运行库目录。
 
 构建成功后更新 `dist/current-launcher.txt`，供验收脚本自动定位输出文件。同一个 EXE 正在运行时 Windows 无法覆盖它。
 
@@ -29,6 +29,14 @@ py -3.11 -m venv .venv
 发布者已确认本项目应用的 Minecraft 服务访问审核通过，仍应维护应用注册与服务访问配置。回归测试模拟认证响应，不代替真实账号登录验证。
 
 登录失败时分别显示 Xbox Live、XSTS、Minecraft 登录、授权检查及玩家档案请求的 HTTP 失败阶段和错误码，并在运行数据目录写入 `auth-last-error.json`。文件仅记录时间、固定接口、状态码、已筛选的错误码与建议，不保存请求内容、令牌或服务端原始响应。
+
+## CurseForge 发行版密钥
+
+本地构建从 Git 忽略的 `publisher.local.json` 读取 `curseforge_api_key`，也支持构建环境变量 `STARMOON_CURSEFORGE_API_KEY`（优先级更高）。构建脚本将它合入 EXE 内部的发布者配置；公开的 `publisher.json` 继续只保存微软公开应用 ID，源码导出不包含私有配置。CI 构建可用同名 GitHub Actions Secret 注入环境变量。
+
+运行时优先使用玩家在「设置 → 下载」填写的自定义密钥，否则使用发行版内置密钥。搜索、内容下载和整合包导入/升级共用这一规则；内置密钥不写入玩家的 `config.json`，界面仅接收配置状态。未提供发行版密钥的源码构建仍支持自行填写。
+
+单文件 EXE 中的内置密钥可以被提取，不能作为对使用者保密的服务端凭据。公开源码和普通构建日志不得包含真实密钥。
 
 ## 目录职责
 
